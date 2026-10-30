@@ -32,5 +32,7 @@ const norm = (s: string) => s.replace(/\r\n/g, '\n')
 export function quoteInDescription(quote: string, body: string): boolean {
   if (typeof quote !== 'string' || typeof body !== 'string') return false
   const q = norm(quote).trim()
-  return q.length >= MIN_QUOTE && norm(body).includes(q)
+  if (q.replace(/\s/gu, '').length < MIN_QUOTE) return false
+  if (!/[\p{L}\p{N}]/u.test(q)) return false
+  return norm(body).includes(q)
 }

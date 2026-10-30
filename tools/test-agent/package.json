@@ -10,7 +10,7 @@
     "test": "vitest run",
     "test:docker": "vitest run --config vitest.docker.config.ts",
     "typecheck": "tsc --noEmit",
-    "format": "prettier --write src tests"
+    "format": "prettier --write src tests schema"
   },
   "dependencies": {
     "@octokit/rest": "22.0.1",

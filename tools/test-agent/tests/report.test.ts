@@ -76,6 +76,38 @@ describe('validateReport', () => {
     expect(bad((r) => (r.files[1].skip.file = '../e')).ok).toBe(false)
     expect(bad((r) => (r.files[0].path = 'a/..b/c.ts')).ok).toBe(true)
   })
+  it('rejects non-canonical paths', () => {
+    for (const p of ['.', './x.ts', 'a/./b.ts', 'a//b.ts', 'a/', '..', 'a/..'])
+      expect(bad((r) => (r.files[0].path = p)).ok, p).toBe(false)
+    expect(bad((r) => (r.files[0].path = 'a/.hidden/b.ts')).ok).toBe(true)
+  })
+  it('enforces action/skip/testFile cross-field rules', () => {
+    expect(bad((r) => delete r.files[1].skip).ok).toBe(false)
+    expect(bad((r) => delete r.files[0].testFile).ok).toBe(false)
+    expect(bad((r) => (r.files[0].action = 'update')).ok).toBe(true)
+    expect(bad((r) => delete r.files[0].testFile).ok).toBe(false)
+    expect(
+      bad((r) => (r.files[0].skip = { reason: 'excluded-from-coverage' })).ok,
+    ).toBe(false)
+    expect(
+      bad((r) => {
+        r.files[0].action = 'gave-up'
+        delete r.files[0].testFile
+      }).ok,
+    ).toBe(true)
+    expect(
+      bad((r) => {
+        r.files[0].action = 'gave-up'
+        r.files[0].skip = { reason: 'excluded-from-coverage' }
+      }).ok,
+    ).toBe(false)
+  })
+  it('rejects a __proto__ key from JSON.parse', () => {
+    const r = JSON.parse(
+      JSON.stringify(valid()).replace(/^\{/, '{"__proto__":{"x":1},'),
+    )
+    expect(validateReport(r).ok).toBe(false)
+  })
   it('rejects ambiguous skip and bad citations', () => {
     expect(bad((r) => (r.files[1].skip = { reason: 'other' })).ok).toBe(false)
     expect(

@@ -62,6 +62,11 @@ describe('quoteInDescription', () => {
     expect(quoteInDescription('   Line one   ', body)).toBe(false)
     expect(quoteInDescription('', body)).toBe(false)
   })
+  it('requires 10 non-whitespace chars and an alphanumeric', () => {
+    expect(quoteInDescription('----------', 'x ---------- y')).toBe(false)
+    expect(quoteInDescription('a b c d e f', 'a b c d e f')).toBe(false)
+    expect(quoteInDescription('abcde fghij', 'abcde fghij')).toBe(true)
+  })
   it('trims surrounding whitespace and requires exact match', () => {
     expect(quoteInDescription('  must return 422  \n', body)).toBe(true)
     expect(quoteInDescription('must  return 422', body)).toBe(false)
