@@ -125,9 +125,9 @@ describe('runVerify happy path', () => {
     }
     for (const d of w.docker) {
       expect(argOf(d.argv, '--user')).toBe('1001:1001')
-      expect(argOf(d.argv, '--network')).toBe(
-        d.step === 'prisma-generate' ? 'default' : 'none',
-      )
+      // Every container, prisma generate included: Prisma 7 generates offline, and schema
+      // generators or prisma.config.ts are PR code that must not reach the network.
+      expect(argOf(d.argv, '--network')).toBe('none')
       expect(d.argv).toContain('--cap-drop')
       expect(d.argv).toContain('--memory')
     }

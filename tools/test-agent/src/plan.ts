@@ -20,6 +20,53 @@ export interface PlanInput {
   baseExcludes: Record<App, string[]>
   /** Line counts of head files that were renamed into a source path from a non-source origin (see renamedIntoSource). */
   newFileLineCounts?: Record<string, number>
+  /** Head content of policy.prismaSchemaPath (null when absent); omitted skips the check. */
+  prismaSchema?: string | null
+}
+
+/** Removes `//` comments (Prisma's only comment syntax) outside double-quoted strings. */
+function stripPrismaComments(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      let quoted = false
+      for (let i = 0; i < line.length; i++) {
+        const c = line[i]
+        if (c === '\\' && quoted) i++
+        else if (c === '"') quoted = !quoted
+        else if (!quoted && c === '/' && line[i + 1] === '/')
+          return line.slice(0, i)
+      }
+      return line
+    })
+    .join('\n')
+}
+
+/**
+ * A Prisma generator's provider is a command `prisma generate` runs. Only the built-in clients are
+ * allowed; anything else (a custom command, env(), several generators of other kinds) is reported
+ * so the run stops as config-changed for human review. Null when the schema is acceptable.
+ */
+export function prismaGeneratorProblem(
+  schema: string | null,
+  allowed: string[],
+): string | null {
+  if (schema === null) return 'prisma schema missing on head'
+  const text = stripPrismaComments(schema)
+  const keywords = text.match(/^\s*generator\b/gm)?.length ?? 0
+  const blocks = [...text.matchAll(/^\s*generator\s+\w+\s*\{([^{}]*)\}/gm)]
+  if (keywords === 0) return 'prisma schema has no generator'
+  if (blocks.length !== keywords)
+    return 'prisma generator block could not be parsed'
+  for (const [, body] of blocks) {
+    const providers = [...body.matchAll(/^\s*provider\s*=\s*(.*?)\s*$/gm)]
+    if (providers.length !== 1)
+      return 'prisma generator must set exactly one provider'
+    const value = /^"([^"\\]*)"$/.exec(providers[0][1])?.[1]
+    if (value === undefined || !allowed.includes(value))
+      return `prisma generator provider not allowed: ${providers[0][1].slice(0, 80)}`
+  }
+  return null
 }
 
 /**
@@ -105,7 +152,12 @@ export function buildPlan(input: PlanInput): Plan {
   const draft = pr?.draft ?? false
   const earlyOutcome: Plan['earlyOutcome'] = draft
     ? 'draft'
-    : touched.some((p) => isConfigPath(policy, p))
+    : touched.some((p) => isConfigPath(policy, p)) ||
+        (input.prismaSchema !== undefined &&
+          prismaGeneratorProblem(
+            input.prismaSchema,
+            policy.allowedPrismaGenerators,
+          ) !== null)
       ? 'config-changed'
       : manifest.length === 0
         ? 'nothing-to-test'

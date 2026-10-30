@@ -141,7 +141,16 @@ try {
     .filter((p) => p !== '' && isTestPath(policy, p))
     .sort()
 
+  // The head schema decides which generators `prisma generate` will run later (ADR 0009).
+  const schemaAt = await exec(
+    'git',
+    ['cat-file', '-p', `${head}:${policy.prismaSchemaPath}`],
+    { cwd: work },
+  )
+  const prismaSchema = schemaAt.code === 0 ? schemaAt.stdout : null
+
   const plan = buildPlan({
+    prismaSchema,
     newFileLineCounts,
     mode: 'pr',
     policy,

@@ -21,7 +21,7 @@ Option 2:
 - **Test file discovery** uses our own glob, defined on the base branch and applied to the head. Every file it matches must actually have been run by Vitest; this catches `include` tricks without running the base suites a second time.
 - **Test count baseline** is the head before the agent's patch. After the patch, the number of tests must not drop. This gate polices the agent and config tricks, not the pull request author.
 - **Tests removed by the author** do not block; that is for human review. The comment states how many tests the pull request removes and in which files, computed statically from the diff against base without running suites.
-- **Config changes stop the agent.** If the pull request changes `vitest.config.*`, `vite.config.*` or any `tsconfig*.json`, the agent does not start, the check is neutral, and the comment says the config changed and a human review is required.
+- **Config changes stop the agent.** If the pull request changes `vitest.config.*`, `vite.config.*` or any `tsconfig*.json`, or its Prisma schema declares a generator other than the built-in clients (ADR 0009), the agent does not start, the check is neutral, and the comment says the config changed and a human review is required.
 - These config files are covered by `CODEOWNERS`.
 
 ## Why

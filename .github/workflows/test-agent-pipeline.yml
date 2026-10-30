@@ -93,7 +93,8 @@ jobs:
         run: |
           user="$(id -u):$(id -g)"
           if [ "$APP" = backend ]; then
-            docker run --rm --user "$user" -e HOME=/tmp \
+            docker run --rm --network none --user "$user" --env-file /dev/null -e HOME=/tmp \
+              --cap-drop ALL --security-opt no-new-privileges \
               -v "$PWD/work/backend:/app" -w /app "$TEST_AGENT_IMAGE" npx prisma generate
           fi
           mkdir -p "$RUNNER_TEMP/cov"
@@ -166,10 +167,15 @@ jobs:
           name: plan
           path: ${{ runner.temp }}/run
       - name: Generate the Prisma client in a container (ADR 0009)
+        # Generators and prisma.config.ts are PR code: no network, no environment, only the
+        # backend directory mounted. Prisma 7 generates offline.
         run: |
-          docker run --rm --user "$(id -u):$(id -g)" --env-file /dev/null -e HOME=/tmp \
+          docker run --rm --network none --user "$(id -u):$(id -g)" --env-file /dev/null -e HOME=/tmp \
+            --cap-drop ALL --security-opt no-new-privileges \
             -v "$PWD/work/backend:/app" -w /app "$TEST_AGENT_IMAGE" npx prisma generate
       - name: Install Claude Code
+        # Outside the workspace so npm never picks up an .npmrc from the checkouts.
+        working-directory: ${{ runner.temp }}
         run: npm install --global --no-audit --no-fund @anthropic-ai/claude-code@2.1.287
       - name: Replace PR-supplied agent configuration with the trusted copy
         run: node trusted/tools/test-agent/src/cli/prepare-workspace.ts --trusted trusted --work work

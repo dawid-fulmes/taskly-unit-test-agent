@@ -54,3 +54,25 @@ describe('publish', () => {
     expect(job).toMatch(/\n    environment: test-agent-pr\n/)
   })
 })
+
+describe('prisma generate', () => {
+  // Generators and prisma.config.ts are PR code; Prisma 7 generates offline.
+  it('always runs in a container with no network and an empty environment', () => {
+    const runs = pipeline.split('docker run').slice(1)
+    const prisma = runs.filter((r) =>
+      r
+        .slice(
+          0,
+          r.indexOf('\n      - ') === -1 ? undefined : r.indexOf('\n      - '),
+        )
+        .includes('prisma generate'),
+    )
+    expect(prisma.length).toBeGreaterThanOrEqual(2)
+    for (const r of prisma) {
+      const cmd = r.slice(0, r.indexOf('prisma generate'))
+      expect(cmd).toContain('--network none')
+      expect(cmd).toContain('--env-file /dev/null')
+      expect(cmd).toContain('--cap-drop ALL')
+    }
+  })
+})

@@ -6,3 +6,5 @@
 /backend/tsconfig*.json        @dawid-fulmes
 /frontend/vite.config.*        @dawid-fulmes
 /frontend/tsconfig*.json       @dawid-fulmes
+/backend/prisma/                @dawid-fulmes
+/backend/prisma.config.ts       @dawid-fulmes

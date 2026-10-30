@@ -33,7 +33,7 @@ The container does not fully close the gap: a malicious test can forge the raw r
 
 Two further residual risks were accepted during implementation:
 
-- `prisma generate` executes pull request code (the `prisma` package from the head lockfile and `prisma.config.ts`) in a container with network access but no secrets, writing into the work copy that later runs reuse. Only the author's own pull request can be influenced.
+- `prisma generate` executes pull request code (the `prisma` package from the head lockfile and `prisma.config.ts`; custom schema generators are rejected by the plan, ADR 0009) in a container with no network and no secrets, writing into the work copy that later runs reuse. Only the author's own pull request can be influenced.
 - Tests written by the agent run in the same process as the Vitest task objects. The gates reject the known ways a test can reach and flip its own result (context and task access, reflection helpers, runner imports, `vitest/*` internals, dynamic imports, computed writes), but text gates over JavaScript cannot be complete. A prompt-injected agent could still write a test that reports itself as passing. The tests are visible in the pull request diff for human review; a separate trusted harness or mutation testing is a production extension.
 
 ## Why

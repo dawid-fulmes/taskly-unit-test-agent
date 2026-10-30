@@ -13,6 +13,10 @@ export interface Policy {
   skipMinChangedLineCoverage: number
   forbiddenTestCalls: string[]
   forbiddenAssertions: string[]
+  /** The Prisma schema the backend generates its client from (repo-relative). */
+  prismaSchemaPath: string
+  /** Built-in Prisma generator providers; anything else is code a PR could make `prisma generate` run. */
+  allowedPrismaGenerators: string[]
 }
 
 const DEFAULT_POLICY_FILE = new URL('../policy.json', import.meta.url)

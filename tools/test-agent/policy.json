@@ -41,5 +41,7 @@
     "toMatchFileSnapshot(",
     "toThrowErrorMatchingSnapshot(",
     "toThrowErrorMatchingInlineSnapshot("
-  ]
+  ],
+  "prismaSchemaPath": "backend/prisma/schema.prisma",
+  "allowedPrismaGenerators": ["prisma-client", "prisma-client-js"]
 }

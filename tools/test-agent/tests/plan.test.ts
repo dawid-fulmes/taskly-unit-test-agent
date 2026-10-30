@@ -9,7 +9,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { exec } from '../src/exec.ts'
-import { buildPlan, type PlanInput } from '../src/plan.ts'
+import {
+  buildPlan,
+  prismaGeneratorProblem,
+  type PlanInput,
+} from '../src/plan.ts'
 import { loadPolicy } from '../src/policy.ts'
 
 function modified(path: string, hunk = '@@ -1,0 +2,1 @@\n+x\n'): string {
@@ -292,6 +296,37 @@ describe('plan CLI', () => {
     return { r, out }
   }
 
+  const schemaWith = (provider: string) =>
+    `generator client {\n  provider = "${provider}"\n}\n\ndatasource db {\n  provider = "postgresql"\n}\n`
+  it.each([
+    ['prisma-client', null],
+    ['node ./evil.js', 'config-changed'],
+  ])(
+    'head schema generator %s -> earlyOutcome %s',
+    async (provider, expected) => {
+      const { r, out } = await repo(
+        (d) => {
+          mkdirSync(join(d, 'backend/src'), { recursive: true })
+          mkdirSync(join(d, 'backend/prisma'), { recursive: true })
+          writeFileSync(join(d, 'backend/src/a.ts'), 'a\n')
+          writeFileSync(
+            join(d, 'backend/prisma/schema.prisma'),
+            schemaWith('prisma-client'),
+          )
+        },
+        (d) => {
+          writeFileSync(join(d, 'backend/src/a.ts'), 'a\nb\n')
+          writeFileSync(
+            join(d, 'backend/prisma/schema.prisma'),
+            schemaWith(provider),
+          )
+        },
+      )
+      expect(r.code).toBe(0)
+      expect(JSON.parse(readFileSync(out, 'utf8')).earlyOutcome).toBe(expected)
+    },
+  )
+
   it('binary-flagged source (-diff attribute) still yields a manifest entry', async () => {
     const { r, out } = await repo(
       (d) => {
@@ -403,5 +438,78 @@ describe('plan CLI backfill', () => {
       'backend/tests/r.test.ts',
       'frontend/src/a/B.test.tsx',
     ])
+  })
+})
+
+describe('prisma generator allowlist', () => {
+  const allowed = ['prisma-client', 'prisma-client-js']
+  const schema = (gen: string) =>
+    `${gen}\n\ndatasource db {\n  provider = "postgresql"\n}\n`
+  const repoGenerator = `generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+}`
+
+  it('accepts the repository generator and the classic JS client', () => {
+    expect(prismaGeneratorProblem(schema(repoGenerator), allowed)).toBeNull()
+    expect(
+      prismaGeneratorProblem(
+        schema('generator client {\n  provider = "prisma-client-js"\n}'),
+        allowed,
+      ),
+    ).toBeNull()
+  })
+
+  it.each([
+    ['custom command', 'generator x {\n  provider = "node ./evil.js"\n}'],
+    ['env provider', 'generator x {\n  provider = env("GEN")\n}'],
+    ['missing provider', 'generator x {\n  output = "./x"\n}'],
+    [
+      'second generator',
+      `${'generator client {\n  provider = "prisma-client"\n}'}\ngenerator docs {\n  provider = "prisma-docs-generator"\n}`,
+    ],
+    ['single quotes', "generator x {\n  provider = 'node evil.js'\n}"],
+  ])('rejects %s', (_name, gen) => {
+    expect(prismaGeneratorProblem(schema(gen), allowed)).toMatch(/generator/)
+  })
+
+  it('ignores generators inside comments but not real ones next to them', () => {
+    const text = schema(
+      `// generator old {\n//   provider = "node evil.js"\n// }\n${repoGenerator}`,
+    )
+    expect(prismaGeneratorProblem(text, allowed)).toBeNull()
+  })
+
+  it("accepts this repository's real schema", () => {
+    const real = readFileSync(
+      new URL('../../../backend/prisma/schema.prisma', import.meta.url),
+      'utf8',
+    )
+    expect(
+      prismaGeneratorProblem(real, loadPolicy().allowedPrismaGenerators),
+    ).toBeNull()
+  })
+
+  it('treats a missing schema as a problem (fail closed)', () => {
+    expect(prismaGeneratorProblem(null, allowed)).toMatch(/schema/)
+  })
+
+  it('makes buildPlan return config-changed for a custom generator', () => {
+    const plan = buildPlan(
+      input(modified('backend/src/features/todos/router.ts'), {
+        prismaSchema: schema('generator x {\n  provider = "node ./evil.js"\n}'),
+      }),
+    )
+    expect(plan.earlyOutcome).toBe('config-changed')
+  })
+
+  it('keeps draft first', () => {
+    const plan = buildPlan(
+      input(modified('backend/src/features/todos/router.ts'), {
+        prismaSchema: schema('generator x {\n  provider = "node ./evil.js"\n}'),
+        pr: { number: 7, title: 'T', body: 'B', draft: true, labels: [] },
+      }),
+    )
+    expect(plan.earlyOutcome).toBe('draft')
   })
 })

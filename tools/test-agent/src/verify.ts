@@ -278,8 +278,9 @@ export async function runVerify(
       return await finish()
     }
 
-    // Prisma client for the backend (ADR 0009): head code, so in a container; no secrets.
-    // It writes the generated client into work/, which every later sandbox copies.
+    // Prisma client for the backend (ADR 0009): head code (generators, prisma.config.ts), so in a
+    // container with no network and no secrets. Prisma 7 generates offline. It writes the
+    // generated client into work/, which every later sandbox copies.
     log('prisma generate')
     const prismaResults = path.join(runDir, 'results', 'prisma-generate')
     await fs.mkdir(prismaResults, { recursive: true })
@@ -289,7 +290,7 @@ export async function runVerify(
         appDir: path.join(workDir, 'backend'),
         resultsDir: prismaResults,
         command: PRISMA_GENERATE,
-        network: 'default',
+        network: 'none',
         name: `test-agent-verify-${randomBytes(4).toString('hex')}-prisma-generate`,
         timeoutMs: env.timeoutMs,
         user,
