@@ -52,16 +52,22 @@ export interface VerdictInputs {
     App,
     { typecheck: boolean; suite: RunSummary; expectedFiles: string[] }
   > | null
-  /** R9: existing test files the patch modified (from the patch, not the report). */
-  modifiedTestFiles: string[]
-  /** One entry per new or changed test file; `tests` holds every test result of all its runs. */
+  /** Test files the patch adds or modifies (from the patch, never the report; evidence excluded). Each needs a stability entry; R9 compares passing counts for `modified` ones. */
+  patchTestFiles: { path: string; status: 'added' | 'modified' }[]
+  /** One entry per patch test file; `tests` holds every test result of all its runs. */
   stability: {
     file: string
     passedRuns: number
     tests: { name: string; status: TestStatus }[]
   }[]
-  /** Keyed by the manifest (source) path the skip is claimed for. */
-  skipChecks: { path: string; ok: boolean; detail: string }[]
+  /** One per cited skip: keyed by the manifest (source) path plus the cited test file and name. */
+  skipChecks: {
+    path: string
+    file: string
+    testName: string
+    ok: boolean
+    detail: string
+  }[]
   evidence: {
     file: string
     failuresOnHead: number
@@ -223,7 +229,9 @@ function verificationProblems(
   after: NonNullable<VerdictInputs['after']>,
 ): string[] {
   const out: string[] = []
-  const modified = new Set(i.modifiedTestFiles)
+  const modified = new Set(
+    i.patchTestFiles.filter((f) => f.status === 'modified').map((f) => f.path),
+  )
   const stabilityByFile = new Map(i.stability.map((s) => [s.file, s]))
   const basePassed: Record<string, number> = {}
   const afterPassed: Record<string, number> = {}
@@ -255,19 +263,22 @@ function verificationProblems(
     }
   }
 
-  for (const f of i.modifiedTestFiles) {
-    const before = basePassed[f] ?? 0
-    const now = afterPassed[f] ?? 0
+  for (const f of i.patchTestFiles) {
+    if (!stabilityByFile.has(f.path)) out.push(`${f.path}: no stability run`)
+    if (f.status !== 'modified') continue
+    const before = basePassed[f.path] ?? 0
+    const now = afterPassed[f.path] ?? 0
     if (now < before)
-      out.push(`${f}: passing tests dropped from ${before} to ${now}`)
-    if (!stabilityByFile.has(f)) out.push(`${f}: no stability run`)
+      out.push(`${f.path}: passing tests dropped from ${before} to ${now}`)
   }
 
   for (const s of i.stability) {
-    if (s.passedRuns < STABILITY_RUNS)
+    if (s.passedRuns !== STABILITY_RUNS)
       out.push(
         `${s.file}: passed ${s.passedRuns}/${STABILITY_RUNS} stability runs`,
       )
+    if (!s.tests.some((t) => t.status === 'passed'))
+      out.push(`${s.file}: no passed test in stability runs`)
     const flagged = new Set<string>()
     for (const t of s.tests) {
       if (isClean(t.status)) continue
@@ -302,12 +313,27 @@ function verificationProblems(
   return out
 }
 
+function checksFor(
+  i: VerdictInputs,
+  path: string,
+  cited: { file: string; testName: string },
+) {
+  return i.skipChecks.filter(
+    (c) =>
+      c.path === path && c.file === cited.file && c.testName === cited.testName,
+  )
+}
+
 function skipProblems(i: VerdictInputs, report: Report): string[] {
   const out: string[] = []
   const manifest = new Map(i.plan.manifest.map((m) => [m.path, m]))
   for (const f of report.files) {
     const m = manifest.get(f.path)
-    if (!m || f.action !== 'skip' || !f.skip) continue
+    if (!m || f.action !== 'skip') continue
+    if (!f.skip) {
+      out.push(`skip of ${f.path} not verified: no skip target`)
+      continue
+    }
     if ('reason' in f.skip) {
       if (!m.excludedOnBase)
         out.push(
@@ -315,11 +341,13 @@ function skipProblems(i: VerdictInputs, report: Report): string[] {
         )
       continue
     }
-    const checks = i.skipChecks.filter((c) => c.path === f.path)
+    const cited = testId(f.skip.file, f.skip.testName)
+    const checks = checksFor(i, f.path, f.skip)
     if (checks.length === 0)
-      out.push(`skip of ${f.path} not verified: no check ran`)
+      out.push(`skip of ${f.path} citing ${cited} not verified: no check ran`)
     for (const c of checks)
-      if (!c.ok) out.push(`skip of ${f.path} not verified: ${c.detail}`)
+      if (!c.ok)
+        out.push(`skip of ${f.path} citing ${cited} not verified: ${c.detail}`)
   }
   return out
 }
@@ -377,7 +405,9 @@ function fileRows(
       case 'gave-up':
         return { path: m.path, action: 'gave up', details: '' }
       case 'skip': {
-        if (!f.skip || 'reason' in f.skip)
+        if (!f.skip)
+          return { path: m.path, action: 'skip', details: 'no skip target' }
+        if ('reason' in f.skip)
           return m.excludedOnBase
             ? { path: m.path, action: 'excluded from coverage', details: '' }
             : {
@@ -387,8 +417,9 @@ function fileRows(
                   'claimed excluded from coverage (not excluded on base)',
               }
         const cited = testId(f.skip.file, f.skip.testName)
-        const failed = i.skipChecks.filter((c) => c.path === m.path && !c.ok)
-        const checked = i.skipChecks.some((c) => c.path === m.path)
+        const checks = checksFor(i, m.path, f.skip)
+        const failed = checks.filter((c) => !c.ok)
+        const checked = checks.length > 0
         const suffix =
           failed.length > 0
             ? ` (unverified: ${failed.map((c) => c.detail).join('; ')})`

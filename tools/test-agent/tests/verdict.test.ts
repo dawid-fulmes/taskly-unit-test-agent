@@ -211,7 +211,10 @@ function inputs(): VerdictInputs {
         expectedFiles: [X],
       },
     },
-    modifiedTestFiles: [D],
+    patchTestFiles: [
+      { path: A, status: 'added' },
+      { path: D, status: 'modified' },
+    ],
     stability: [
       {
         file: A,
@@ -229,7 +232,15 @@ function inputs(): VerdictInputs {
         ),
       },
     ],
-    skipChecks: [{ path: 'backend/src/b.ts', ok: true, detail: '100%' }],
+    skipChecks: [
+      {
+        path: 'backend/src/b.ts',
+        file: B,
+        testName: 'covers b',
+        ok: true,
+        detail: '100%',
+      },
+    ],
     evidence: [],
     numbers: numbers(),
     patchSha256: 'abc123',
@@ -248,7 +259,7 @@ function deepFreeze<T>(o: T): T {
 /** Report patch with nothing but skips, all verified. */
 function alreadyCovered(i: VerdictInputs) {
   i.patchEmpty = true
-  i.modifiedTestFiles = []
+  i.patchTestFiles = []
   i.stability = []
   i.after!.backend.suite = run(baselineBackend)
   i.after!.backend.expectedFiles = [B, D, LEGACY]
@@ -280,8 +291,14 @@ function alreadyCovered(i: VerdictInputs) {
       ],
     },
   }
-  i.skipChecks = ['a', 'b', 'd'].map((n) => ({
+  i.skipChecks = [
+    ['a', B, 'covers b'],
+    ['b', B, 'covers b'],
+    ['d', D, 'd1'],
+  ].map(([n, file, testName]) => ({
     path: `backend/src/${n}.ts`,
+    file: file!,
+    testName: testName!,
     ok: true,
     detail: '90%',
   }))
@@ -468,9 +485,8 @@ const cases: Case[] = [
   {
     name: 'skip-unverified: skip check failed',
     mutate: (i) => {
-      i.skipChecks = [
-        { path: 'backend/src/b.ts', ok: false, detail: 'covers 40%' },
-      ]
+      i.skipChecks[0]!.ok = false
+      i.skipChecks[0]!.detail = 'covers 40%'
     },
     outcome: 'skip-unverified',
     conclusion: 'neutral',
@@ -782,7 +798,7 @@ const cases: Case[] = [
   {
     name: 'R9: a base-skipped test in a file the patch modified still fails',
     mutate: (i) => {
-      i.modifiedTestFiles = [D, LEGACY]
+      i.patchTestFiles.push({ path: LEGACY, status: 'modified' })
       i.stability.push({
         file: LEGACY,
         passedRuns: 3,
@@ -891,7 +907,7 @@ const cases: Case[] = [
   {
     name: 'skip check for another path does not verify the skip',
     mutate: (i) => {
-      i.skipChecks = [{ path: 'backend/src/a.ts', ok: true, detail: '100%' }]
+      i.skipChecks[0]!.path = 'backend/src/a.ts'
     },
     outcome: 'skip-unverified',
     conclusion: 'neutral',
@@ -906,6 +922,96 @@ const cases: Case[] = [
     conclusion: 'neutral',
     commitAllowed: false,
     reason: /frontend\/src\/c\.tsx.*excluded/,
+  },
+  {
+    name: 'skip check citing another test does not verify the skip',
+    mutate: (i) => {
+      i.skipChecks[0]!.testName = 'something else'
+    },
+    outcome: 'skip-unverified',
+    conclusion: 'neutral',
+    commitAllowed: false,
+    reason: /backend\/src\/b\.ts.*covers b/,
+  },
+  {
+    name: 'I3: two skips for one file citing different tests need a check each',
+    mutate: (i) => {
+      if (i.report?.ok)
+        i.report.report.files.push({
+          path: 'backend/src/b.ts',
+          action: 'skip',
+          skip: { file: D, testName: 'd1' },
+        })
+    },
+    outcome: 'skip-unverified',
+    conclusion: 'neutral',
+    commitAllowed: false,
+    reason: /backend\/src\/b\.ts.*d\.test\.ts > d1.*no check ran/,
+  },
+  {
+    name: 'I3: two skips for one file, each with its own ok check',
+    mutate: (i) => {
+      if (i.report?.ok)
+        i.report.report.files.push({
+          path: 'backend/src/b.ts',
+          action: 'skip',
+          skip: { file: D, testName: 'd1' },
+        })
+      i.skipChecks.push({
+        path: 'backend/src/b.ts',
+        file: D,
+        testName: 'd1',
+        ok: true,
+        detail: '85%',
+      })
+    },
+    outcome: 'tests-added',
+    conclusion: 'success',
+    commitAllowed: true,
+  },
+  {
+    name: 'I4: skip action without a skip target fails closed',
+    mutate: (i) => {
+      if (i.report?.ok)
+        i.report.report.files[1] = { path: 'backend/src/b.ts', action: 'skip' }
+    },
+    outcome: 'skip-unverified',
+    conclusion: 'neutral',
+    commitAllowed: false,
+    reason: /backend\/src\/b\.ts.*no skip target/,
+  },
+  {
+    name: 'I1: a new patch test file the report does not name still needs stability',
+    mutate: (i) => {
+      const A2 = 'backend/tests/a2.test.ts'
+      i.patchTestFiles.push({ path: A2, status: 'added' })
+      i.after!.backend.suite = run([...afterBackend, [A2, 'b1', 'passed']])
+      i.after!.backend.expectedFiles.push(A2)
+    },
+    outcome: 'verification-failed',
+    conclusion: 'neutral',
+    commitAllowed: false,
+    reason: /a2\.test\.ts: no stability run/,
+  },
+  {
+    name: 'I2: more than 3 passed stability runs is not accepted',
+    mutate: (i) => {
+      i.stability[0]!.passedRuns = 4
+    },
+    outcome: 'verification-failed',
+    conclusion: 'neutral',
+    commitAllowed: false,
+    reason: /a\.test\.ts: passed 4\/3/,
+  },
+  {
+    name: 'I2: a stability entry without any passed test is not accepted',
+    mutate: (i) => {
+      i.stability[0]!.tests = []
+    },
+    outcome: 'verification-failed',
+    conclusion: 'neutral',
+    commitAllowed: false,
+    reason: /a\.test\.ts: no passed test in stability runs/,
   },
 ]
 
@@ -1001,7 +1107,8 @@ describe('computeVerdict', () => {
 
   it('shows a missing decision and an unverified skip in the files table', () => {
     const i = inputs()
-    i.skipChecks = [{ path: 'backend/src/b.ts', ok: false, detail: '40%' }]
+    i.skipChecks[0]!.ok = false
+    i.skipChecks[0]!.detail = '40%'
     if (i.report?.ok)
       i.report.report.files = i.report.report.files.filter(
         (f) => f.path !== 'backend/src/d.ts',
