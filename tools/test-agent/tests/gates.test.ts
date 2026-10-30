@@ -637,6 +637,72 @@ describe('checkPatch round 5: blanked literals and assertion overrides', () => {
   })
 })
 
+describe('checkPatch: test-context result tampering', () => {
+  const lines = (text: string) => ['expect(1)', ...text.split('\n')]
+  const added = (text: string, path = 'backend/tests/a.test.ts') => {
+    const l = lines(text)
+    return `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${l.length} @@\n${l.map((x) => '+' + x).join('\n')}\n`
+  }
+  const mod = (text: string) => {
+    const l = text.split('\n')
+    return `diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts\n--- a/backend/tests/a.test.ts\n+++ b/backend/tests/a.test.ts\n@@ -3,0 +4,${l.length} @@\n${l.map((x) => '+' + x).join('\n')}\n`
+  }
+  const weakening = (diff: string) =>
+    check(diff).violations.filter((v) => v.rule === 'weakening')
+
+  const tampering = [
+    "onTestFailed(({ task }) => { task.result!.state = 'pass' })",
+    "import { onTestFinished } from 'vitest'",
+    "it('x', ({ onTestFailed }) => { expect(1).toBe(1) })",
+    "it('x', (ctx) => { ctx.onTestFinished(() => {}) })",
+    "task.result!.state = 'pass'",
+    "t.result.state = 'pass'",
+    't.fails = true',
+    'ctx.task.result.errors = []',
+    "ctx.task.mode = 'skip'",
+    "t.state ??= 'pass'",
+    "t.result! = { state: 'pass' }",
+    "t.result\n  .state = 'pass'",
+    'const all = ctx.task.file.tasks',
+    'const siblings = ctx.task.suite.tasks',
+    'for (const x of suite.tasks) x.mode = "skip"',
+    "t.result['state'] = 'pass'",
+    "ctx['onTestFailed'](() => {})",
+    "const s = t['tasks']",
+  ]
+
+  it.each(tampering)('new test files reject %j', (text) => {
+    expect(weakening(added(text))).not.toEqual([])
+  })
+
+  it.each(tampering)('evidence files reject %j', (text) => {
+    expect(
+      weakening(added(text, 'backend/tests/__evidence__/a.test.ts')),
+    ).not.toEqual([])
+  })
+
+  it.each(tampering)('modified test files reject %j', (text) => {
+    expect(weakening(mod(text))).not.toEqual([])
+  })
+
+  it.each([
+    'expect(store.state).toBe(1)',
+    'expect(res.errors).toEqual([])',
+    "if (a.state === 'x') expect(1).toBe(1)",
+    "expect(a.state != 'x').toBe(true)",
+    "expect(a.mode !== 'x').toBe(true)",
+    'expect(a.result <= 1).toBe(true)',
+    'const s = { state: 1, errors: [], mode: 2, result: 3 }',
+    "const msg = 'onTestFailed and t.fails = true'",
+    '// t.result.state = "pass" and ctx.task.file.tasks',
+    'const r = response.result',
+    'expect(t.tasksDone).toBe(1)',
+    "const resultState = 'x'",
+  ])('new test files allow %j', (text) => {
+    expect(check(added(text)).violations).toEqual([])
+  })
+})
+
 describe('checkPatch on the repository test files', () => {
   const root = fileURLToPath(new URL('../../../', import.meta.url))
   const files = ['backend/tests', 'frontend/src'].flatMap((dir) =>

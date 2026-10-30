@@ -168,6 +168,9 @@ const TEST_GLOBAL_NAME = new RegExp(`^(?:${TEST_GLOBALS})$`)
 // Strings that must not be used as a computed member key.
 const SENSITIVE_KEY =
   /^(?:skip|only|todo|fails|skipIf|runIf|concurrent|sequential|extend|addSnapshotSerializer|addEqualityTesters|chai|Assertion|overwrite\w*|add(?:Method|Property|ChainableMethod)|setState)$/
+// Test-context result members (task.result, t.fails, file.tasks, ...) and result hooks.
+const RESULT_KEY =
+  /^(?:state|errors|result|mode|tasks|onTestFailed|onTestFinished)$/
 const NON_MEMBER_KEYWORDS =
   /(?:^|[^\w$.])(?:return|of|in|typeof|case|yield|await|else|do|void|delete|throw|instanceof|new|extends)$/
 
@@ -175,8 +178,8 @@ const NON_MEMBER_KEYWORDS =
 function computedMembers(
   code: string,
   raw: string,
-): { offset: number; why: string }[] {
-  const out: { offset: number; why: string }[] = []
+): { offset: number; why: string; weakening: boolean }[] {
+  const out: { offset: number; why: string; weakening: boolean }[] = []
   for (let i = 0; i < code.length; i++) {
     if (code[i] !== '[') continue
     const before = code.slice(0, i).replace(/\s+$/, '')
@@ -194,15 +197,21 @@ function computedMembers(
     if (!/['"`]/.test(key)) continue
     const single = /^(['"`])[^'"`]*\1$/.test(key) && !key.includes('${')
     if (!single) {
-      out.push({ offset: i, why: 'computed member key built from strings' })
+      out.push({
+        offset: i,
+        why: 'computed member key built from strings',
+        weakening: false,
+      })
       continue
     }
     const k = raw
       .slice(i + 1, j)
       .trim()
       .slice(1, -1)
-    if (SENSITIVE_KEY.test(k))
-      out.push({ offset: i, why: `computed member key ${JSON.stringify(k)}` })
+    const why = `computed member key ${JSON.stringify(k)}`
+    if (SENSITIVE_KEY.test(k)) out.push({ offset: i, why, weakening: false })
+    else if (RESULT_KEY.test(k))
+      out.push({ offset: i, why: `${why} (test result)`, weakening: true })
   }
   return out
 }
@@ -226,6 +235,9 @@ function buildUnits(d: FileDiff): Unit[] {
     if (d.status === 'modified')
       for (const offset of blockComments)
         weakening.push({ offset, why: 'block comment in existing test file' })
+    const computed = computedMembers(code, raw)
+    for (const c of computed)
+      if (c.weakening) weakening.push({ offset: c.offset, why: c.why })
     let bare = code
     for (const re of IMPORT_STATEMENTS)
       bare = bare.replace(re, (m: string, lead: string, _q, offset: number) => {
@@ -247,7 +259,9 @@ function buildUnits(d: FileDiff): Unit[] {
       raw,
       code,
       bare,
-      forbidden: computedMembers(code, raw),
+      forbidden: computed
+        .filter((c) => !c.weakening)
+        .map(({ offset, why }) => ({ offset, why })),
       weakening,
     }
   })
@@ -311,6 +325,12 @@ const VI_EXPECT_VALUE = new RegExp(
   `(?<![\\w$#.])(?:vi|expect)(?![\\w$])(?!\\s*(?:\\(|\\.[A-Za-z_$]|${TYPE_ARGS_CALL}))`,
   'g',
 )
+// Test-context result tampering: result hooks, writes to task state, walking the task tree.
+const RESULT_HOOK = /(?<![\w$])(?:onTestFailed|onTestFinished)(?![\w$])/
+// `x.state = `, `x.result! = `, `x.state ??= ` (not `!=`, `==`, `<=`, `=>`).
+const RESULT_ASSIGN =
+  /\.(?:state|errors|result|fails|mode)(?![\w$])\s*(?:!\s+)?(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])/
+const TASK_TREE = /\.tasks(?![\w$])/
 const IMPORT_AS = /\bimport\s*(?:type\s*)?(?:\{[^}]*\bas\s+|\*\s*as\s+)/
 const VI_MOCKING =
   /(?<![\w$])vi\.(?:mock|doMock|unmock|doUnmock|stubGlobal|stubEnv)(?![\w$])/
@@ -370,6 +390,10 @@ function weakeningReasons(
   if (usedAsValue(b, perLine)) out.push('test global used as a value')
   if (IMPORT_AS.test(n)) out.push('renaming import')
   if (/\bReflect\s*\./.test(n)) out.push('Reflect usage')
+  if (RESULT_HOOK.test(n))
+    out.push('test result hook (onTestFailed/onTestFinished)')
+  if (RESULT_ASSIGN.test(n)) out.push('assignment to a test result member')
+  if (TASK_TREE.test(n)) out.push('access to the test task tree (.tasks)')
   if (modified) {
     for (const [re, why] of MODIFIED_ONLY) if (re.test(b)) out.push(why)
     const r = normalise(raw)
