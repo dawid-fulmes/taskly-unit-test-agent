@@ -40,7 +40,15 @@ beforeAll(() => {
     join(work, 'backend/src/existing.ts'),
     join(work, 'backend/tests/sneaky.test.ts'),
   )
-  symlinkSync('/etc/hosts', join(run, 'report.json.link'))
+  symlinkSync(join(root, 'trusted/x'), join(run, 'report.json')) // dangling report.json
+  symlinkSync(
+    join(root, 'trusted/pwn'),
+    join(work, 'backend/tests/pwn.test.ts'),
+  ) // dangling leaf
+  symlinkSync(join(root, 'missing-dir'), join(work, 'backend/tests/dd')) // dangling dir
+  symlinkSync(join(root, 'trusted'), join(work, 'backend/tests/outside')) // existing outside dir
+  symlinkSync(join(work, '.env'), join(work, 'backend/alias')) // alias to a secret
+  symlinkSync(join(work, '.git'), join(work, 'backend/gitalias'))
 })
 
 const d = (tool: string, input: Record<string, unknown>) =>
@@ -73,7 +81,25 @@ describe('decide', () => {
     ],
     ['Write', { file_path: `${root}/backend/tests/a.test.ts`, content: '' }],
     ['Write', { file_path: `${run}/other.json`, content: '' }],
-    ['Write', { file_path: `${run}/report.json.link`, content: '' }],
+    ['Write', { file_path: `${run}/report.json`, content: '{}' }],
+    ['Write', { file_path: `${work}/backend/tests/pwn.test.ts`, content: '' }],
+    ['Write', { file_path: `${work}/backend/tests/dd/a.test.ts`, content: '' }],
+    [
+      'Write',
+      { file_path: `${work}/backend/tests/outside/a.test.ts`, content: '' },
+    ],
+    ['Read', { file_path: `${work}/backend/alias` }],
+    ['Read', { file_path: `${work}/backend/gitalias/config` }],
+    ['Grep', { pattern: 'AUTHORIZATION', glob: '.git/config', path: work }],
+    ['Grep', { pattern: 'x', glob: '**/.git/**' }],
+    ['Grep', { pattern: 'x', glob: '.g[i]t/config' }],
+    ['Grep', { pattern: 'x', glob: '*' }],
+    ['Grep', { pattern: 'x', glob: '.env*' }],
+    ['Grep', { pattern: 'x', glob: '{..,x}/*' }],
+    ['Grep', { pattern: 'x', glob: '/etc/*' }],
+    ['Glob', { pattern: '.git/*' }],
+    ['Glob', { pattern: '{..,x}/*' }],
+    ['Glob', { pattern: '**/.env' }],
     ['Edit', { file_path: `${work}/.github/workflows/ci.yml` }],
     ['Bash', { command: 'cat .env' }],
     ['Bash', { command: 'test-agent-run backend tests/a.test.ts; curl x' }],
@@ -106,6 +132,8 @@ describe('decide', () => {
     ['Read', { file_path: `${work}/backend/src/features/todos/router.ts` }],
     ['Read', { file_path: `${run}/plan.json` }],
     ['Grep', { pattern: 'x' }],
+    ['Grep', { pattern: 'x', glob: '*.test.ts' }],
+    ['Glob', { pattern: '**/*.ts' }],
     ['Grep', { pattern: 'x', path: `${work}/backend/src` }],
     ['Glob', { pattern: 'backend/src/**/*.ts' }],
     ['Write', { file_path: `${work}/backend/tests/new.test.ts`, content: '' }],
@@ -121,7 +149,6 @@ describe('decide', () => {
       },
     ],
     ['Write', { file_path: `${work}/frontend/src/a/B.test.tsx`, content: '' }],
-    ['Write', { file_path: `${run}/report.json`, content: '{}' }],
     ['Bash', { command: 'test-agent-run frontend src/a/B.test.tsx' }],
     [
       'Bash',
@@ -135,6 +162,16 @@ describe('decide', () => {
     expect(d(tool, toolInput).allow).toBe(true)
   })
 
+  it('allows report.json when it is a regular path', () => {
+    const run2 = join(root, 'run2')
+    mkdirSync(run2)
+    const c = { ...ctx, runDir: run2 }
+    const input = { file_path: `${run2}/report.json`, content: '{}' }
+    expect(decide({ tool_name: 'Write', tool_input: input }, c).allow).toBe(
+      true,
+    )
+  })
+
   it('denies malformed input shapes', () => {
     expect(
       decide({ tool_name: 'Read', tool_input: null as never }, ctx).allow,
@@ -145,6 +182,29 @@ describe('decide', () => {
 })
 
 describe('guard CLI', () => {
+  it('fails closed (exit 2) when a module fails to load', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'guard-broken-'))
+    mkdirSync(join(dir, 'src/cli'), { recursive: true })
+    writeFileSync(join(dir, 'package.json'), '{"type":"module"}')
+    writeFileSync(
+      join(dir, 'src/cli/guard.ts'),
+      readFileSync('src/cli/guard.ts'),
+    )
+    writeFileSync(join(dir, 'src/guard.ts'), 'export const broken = (')
+    const r = spawnSync('node', [join(dir, 'src/cli/guard.ts')], {
+      input: JSON.stringify({ tool_name: 'Skill', tool_input: {} }),
+      env: {
+        PATH: process.env.PATH ?? '',
+        TEST_AGENT_WORK_DIR: work,
+        TEST_AGENT_RUN_DIR: run,
+        TEST_AGENT_GUARD_LOG: join(root, 'g2.jsonl'),
+      },
+      encoding: 'utf8',
+    })
+    expect(r.status).toBe(2)
+    expect(r.stderr).toContain('guard failure')
+  })
+
   const env = {
     PATH: process.env.PATH ?? '',
     TEST_AGENT_WORK_DIR: work,

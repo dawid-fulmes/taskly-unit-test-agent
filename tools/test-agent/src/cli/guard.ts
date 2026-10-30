@@ -1,6 +1,8 @@
 import { appendFileSync, readFileSync } from 'node:fs'
-import { decide, realpathLoose, type HookInput } from '../guard.ts'
-import { loadPolicy } from '../policy.ts'
+import type { HookInput } from '../guard.ts'
+
+// Only node: built-ins are imported statically. The guard and policy modules are loaded
+// inside the try block so that any load-time failure exits 2 (blocking) instead of 1.
 
 function requireEnv(name: string): string {
   const value = process.env[name]
@@ -9,6 +11,8 @@ function requireEnv(name: string): string {
 }
 
 try {
+  const { decide, realpathLoose } = await import('../guard.ts')
+  const { loadPolicy } = await import('../policy.ts')
   const workDir = requireEnv('TEST_AGENT_WORK_DIR')
   const runDir = requireEnv('TEST_AGENT_RUN_DIR')
   const logFile = requireEnv('TEST_AGENT_GUARD_LOG')

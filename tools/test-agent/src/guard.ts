@@ -1,5 +1,6 @@
-import { realpathSync } from 'node:fs'
+import { lstatSync, realpathSync } from 'node:fs'
 import path from 'node:path'
+import picomatch from 'picomatch'
 import {
   isEvidencePath,
   isSecretPath,
@@ -42,6 +43,14 @@ export function realpathLoose(p: string): string {
     try {
       return path.join(realpathSync(current), ...missing.reverse())
     } catch {
+      // realpath also fails for dangling symlinks: only a true ENOENT on lstat
+      // means "does not exist yet"; anything else (a symlink, EACCES, ELOOP...) is refused.
+      try {
+        lstatSync(current)
+        throw new Error(`unresolvable path component: ${current}`)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
       const parent = path.dirname(current)
       if (parent === current) throw new Error(`cannot resolve ${p}`)
       missing.push(path.basename(current))
@@ -62,12 +71,38 @@ function hasDotDot(value: string): boolean {
   return value.split(/[\\/]/).includes('..')
 }
 
+const SECRET_SAMPLES = ['.env', 'a/.env', '.env.local', 'a/.env.local']
+const GIT_SAMPLES = ['.git', '.git/config', '.git/HEAD', 'a/.git/config']
+
+/** Patterns must stay inside the work dir and must not be able to reach .git or secrets. */
+function patternProblem(pattern: string): string | null {
+  if (path.isAbsolute(pattern) || pattern.startsWith('~'))
+    return 'absolute pattern'
+  if (pattern.includes('..')) return 'pattern contains ..'
+  if (pattern.includes('.git')) return 'pattern references .git'
+  const candidates = pattern.includes('/')
+    ? [pattern]
+    : [pattern, `**/${pattern}`]
+  for (const candidate of candidates) {
+    for (const sample of [...GIT_SAMPLES, ...SECRET_SAMPLES]) {
+      if (picomatch.isMatch(sample, candidate, { dot: true })) {
+        return `pattern can match protected path ${sample}`
+      }
+    }
+  }
+  return null
+}
+
 function resolveTarget(ctx: GuardContext, raw: unknown): string | Decision {
   if (typeof raw !== 'string' || raw === '')
     return deny('missing or invalid path')
   if (raw.startsWith('~') || raw.includes('\0'))
     return deny('unsupported path form')
-  return ctx.realpath(path.resolve(ctx.realpath(ctx.workDir), raw))
+  try {
+    return ctx.realpath(path.resolve(ctx.realpath(ctx.workDir), raw))
+  } catch {
+    return deny('path cannot be safely resolved')
+  }
 }
 
 function decideRead(
@@ -78,21 +113,13 @@ function decideRead(
   const workDir = ctx.realpath(ctx.workDir)
   const runDir = ctx.realpath(ctx.runDir)
   const rawPath = tool === 'Read' ? input.file_path : (input.path ?? workDir)
-  if (tool === 'Glob') {
-    const pattern = input.pattern
-    if (typeof pattern !== 'string') return deny('missing glob pattern')
-    if (
-      path.isAbsolute(pattern) ||
-      pattern.startsWith('~') ||
-      hasDotDot(pattern)
-    ) {
-      return deny('glob pattern escapes the work dir')
-    }
-  }
-  if (tool === 'Grep' && typeof input.glob === 'string') {
-    if (path.isAbsolute(input.glob) || hasDotDot(input.glob)) {
-      return deny('grep glob escapes the work dir')
-    }
+  const pattern =
+    tool === 'Glob' ? input.pattern : tool === 'Grep' ? input.glob : undefined
+  if (tool === 'Glob' && typeof pattern !== 'string')
+    return deny('missing glob pattern')
+  if (typeof pattern === 'string') {
+    const problem = patternProblem(pattern)
+    if (problem !== null) return deny(problem)
   }
   const target = resolveTarget(ctx, rawPath)
   if (typeof target !== 'string') return target
