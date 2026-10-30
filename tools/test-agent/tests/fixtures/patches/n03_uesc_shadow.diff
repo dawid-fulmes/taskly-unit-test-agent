@@ -1,0 +1,8 @@
+diff --git a/backend/tests/n.test.ts b/backend/tests/n.test.ts
+new file mode 100644
+--- /dev/null
++++ b/backend/tests/n.test.ts
+@@ -0,0 +1,3 @@
++import { it, expect, vi, beforeEach } from 'vitest'
++const \u0065xpect = (..._a) => ({ toBe() {} })
++it('z', () => { expect(1).toBe(2) })

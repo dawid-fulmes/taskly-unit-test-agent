@@ -1,0 +1,232 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://taskly.invalid/test-agent/report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["files", "behaviours", "defects", "narrative"],
+  "properties": {
+    "files": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "action"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!(.*/)?\\.\\.?(/|$))(?!.*//)(?!.*/$)[^\\u0000-\\u001f\\u007f]+$"
+          },
+          "action": {
+            "enum": ["create", "update", "skip", "gave-up"]
+          },
+          "testFile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!(.*/)?\\.\\.?(/|$))(?!.*//)(?!.*/$)[^\\u0000-\\u001f\\u007f]+$"
+          },
+          "skip": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["file", "testName"],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!(.*/)?\\.\\.?(/|$))(?!.*//)(?!.*/$)[^\\u0000-\\u001f\\u007f]+$"
+                  },
+                  "testName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["reason"],
+                "properties": {
+                  "reason": {
+                    "const": "excluded-from-coverage"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "const": "skip"
+                }
+              },
+              "required": ["action"]
+            },
+            "then": {
+              "properties": {
+                "skip": true
+              },
+              "required": ["skip"]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "enum": ["create", "update"]
+                }
+              },
+              "required": ["action"]
+            },
+            "then": {
+              "properties": {
+                "testFile": true,
+                "skip": true
+              },
+              "required": ["testFile"],
+              "not": {
+                "required": ["skip"]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "const": "gave-up"
+                }
+              },
+              "required": ["action"]
+            },
+            "then": {
+              "properties": {
+                "skip": true
+              },
+              "not": {
+                "required": ["skip"]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "behaviours": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "description", "source"],
+        "properties": {
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!(.*/)?\\.\\.?(/|$))(?!.*//)(?!.*/$)[^\\u0000-\\u001f\\u007f]+$"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "ref"],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "pr-description",
+                  "openapi",
+                  "type",
+                  "validator",
+                  "characterization"
+                ]
+              },
+              "ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              }
+            }
+          }
+        }
+      }
+    },
+    "defects": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "evidenceTest", "summary", "citation"],
+        "properties": {
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!(.*/)?\\.\\.?(/|$))(?!.*//)(?!.*/$)[^\\u0000-\\u001f\\u007f]+$"
+          },
+          "evidenceTest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!(.*/)?\\.\\.?(/|$))(?!.*//)(?!.*/$)[^\\u0000-\\u001f\\u007f]+$"
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "citation": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "pointer"],
+                "properties": {
+                  "kind": {
+                    "const": "openapi"
+                  },
+                  "pointer": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "quote"],
+                "properties": {
+                  "kind": {
+                    "const": "pr-description"
+                  },
+                  "quote": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "narrative": {
+      "type": "string",
+      "maxLength": 4000
+    }
+  }
+}

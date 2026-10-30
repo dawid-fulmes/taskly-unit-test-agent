@@ -1,0 +1,10 @@
+diff --git a/backend/tests/noexp.test.ts b/backend/tests/noexp.test.ts
+new file mode 100644
+index 0000000..1464f63
+--- /dev/null
++++ b/backend/tests/noexp.test.ts
+@@ -0,0 +1,4 @@
++import { it } from "vitest"
++it("x", () => {
++  console.log(1)
++})

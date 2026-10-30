@@ -1,0 +1,10 @@
+diff --git a/backend/tests/snap.test.ts b/backend/tests/snap.test.ts
+new file mode 100644
+index 0000000..b32bc63
+--- /dev/null
++++ b/backend/tests/snap.test.ts
+@@ -0,0 +1,4 @@
++import { it, expect } from "vitest"
++it("x", () => {
++  expect({}).toMatchSnapshot()
++})

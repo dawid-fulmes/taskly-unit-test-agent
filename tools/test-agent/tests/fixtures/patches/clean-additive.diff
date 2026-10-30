@@ -1,0 +1,21 @@
+diff --git a/backend/tests/new.test.ts b/backend/tests/new.test.ts
+new file mode 100644
+index 0000000..2c66293
+--- /dev/null
++++ b/backend/tests/new.test.ts
+@@ -0,0 +1,4 @@
++import { it, expect } from 'vitest'
++it('works', () => {
++  expect(1 + 1).toBe(2)
++})
+diff --git a/frontend/src/a/B.test.tsx b/frontend/src/a/B.test.tsx
+index f3825ce..e061124 100644
+--- a/frontend/src/a/B.test.tsx
++++ b/frontend/src/a/B.test.tsx
+@@ -2,3 +2,6 @@ import { it, expect } from "vitest"
+ it("x", () => {
+   expect(1).toBe(1)
+ })
++it("y", () => {
++  expect(2).toBe(2)
++})

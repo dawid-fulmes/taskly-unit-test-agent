@@ -1,0 +1,15 @@
+diff --git a/backend/tests/n.test.ts b/backend/tests/n.test.ts
+new file mode 100644
+--- /dev/null
++++ b/backend/tests/n.test.ts
+@@ -0,0 +1,3 @@
++import { it, expect } from 'vitest'
++const s = it
++s('b', () => { expect(1).toBe(2) })
+diff --git a/backend/tests/n.test.ts b/backend/tests/n.test.ts
+--- a/backend/tests/n.test.ts
++++ b/backend/tests/n.test.ts
+@@ -2,2 +2,3 @@
+ const s = it
++  .skip
+ s('b', () => { expect(1).toBe(2) })

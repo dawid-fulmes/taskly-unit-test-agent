@@ -1,0 +1,110 @@
+name: test-agent-pr
+
+# Privileged half of the PR pipeline (ADR 0020). workflow_run always runs this file from main, so
+# a pull request cannot edit what holds the secrets. The trigger artifact is untrusted: the filter
+# re-checks the PR, its head SHA, the fork status and the trailer rule through the API.
+on:
+  workflow_run:
+    workflows: [test-agent-trigger]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  filter:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      path: ${{ steps.decide.outputs.path }}
+      pr_number: ${{ steps.decide.outputs.pr_number }}
+      head_sha: ${{ steps.decide.outputs.head_sha }}
+      budget_profile: ${{ steps.decide.outputs.budget_profile }}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443 api.github.com:443 codeload.github.com:443
+            objects.githubusercontent.com:443 *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443 registry.npmjs.org:443 nodejs.org:443
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: trusted
+          persist-credentials: false
+      - uses: ./trusted/.github/actions/prepare
+        with:
+          trusted: trusted
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: trigger
+          path: trigger
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - id: decide
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TEST_AGENT_BOT_LOGIN: ${{ vars.TEST_AGENT_BOT_LOGIN }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          TRIGGERING_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
+        run: >
+          node trusted/tools/test-agent/src/cli/filter.ts
+          --trigger trigger/trigger.json
+          --workflow-run-head-sha "$RUN_HEAD_SHA"
+          --triggering-actor "$TRIGGERING_ACTOR"
+          --out "$RUNNER_TEMP/filter.json"
+
+  pipeline:
+    needs: filter
+    if: needs.filter.outputs.path == 'pipeline'
+    uses: ./.github/workflows/test-agent-pipeline.yml
+    permissions:
+      contents: read
+      pull-requests: read
+    with:
+      mode: pr
+      pr_number: ${{ needs.filter.outputs.pr_number }}
+      head_sha: ${{ needs.filter.outputs.head_sha }}
+      budget_profile: ${{ needs.filter.outputs.budget_profile }}
+    secrets: inherit
+
+  dismiss:
+    needs: filter
+    if: needs.filter.outputs.path == 'dismiss'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: test-agent-pr
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443 api.github.com:443 codeload.github.com:443
+            objects.githubusercontent.com:443 registry.npmjs.org:443 nodejs.org:443
+      - id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.TEST_AGENT_APP_ID }}
+          private-key: ${{ secrets.TEST_AGENT_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: trusted
+          persist-credentials: false
+      - uses: ./trusted/.github/actions/prepare
+        with:
+          trusted: trusted
+      - env:
+          TEST_AGENT_APP_TOKEN: ${{ steps.app.outputs.token }}
+          TEST_AGENT_APP_ID: ${{ vars.TEST_AGENT_APP_ID }}
+          TEST_AGENT_BOT_LOGIN: ${{ vars.TEST_AGENT_BOT_LOGIN }}
+          PR_NUMBER: ${{ needs.filter.outputs.pr_number }}
+          LABELER: ${{ github.event.workflow_run.triggering_actor.login }}
+        run: >
+          node trusted/tools/test-agent/src/cli/dismiss.ts
+          --pr-number "$PR_NUMBER" --labeler "$LABELER"

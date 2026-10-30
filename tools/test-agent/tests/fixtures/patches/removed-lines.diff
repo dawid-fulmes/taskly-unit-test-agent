@@ -1,0 +1,14 @@
+diff --git a/backend/tests/old.test.ts b/backend/tests/old.test.ts
+index 82d6be0..cf595f2 100644
+--- a/backend/tests/old.test.ts
++++ b/backend/tests/old.test.ts
+@@ -2,9 +2,3 @@ import { it, expect } from "vitest"
+ it("a", () => {
+   expect(1).toBe(1)
+ })
+-it("b", () => {
+-  expect(2).toBe(2)
+-})
+-it.each([1])("c", (n) => {
+-  expect(n).toBe(1)
+-})

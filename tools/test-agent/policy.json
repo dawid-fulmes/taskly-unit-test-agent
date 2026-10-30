@@ -1,0 +1,47 @@
+{
+  "testGlobs": {
+    "backend": ["backend/tests/**/*.test.ts"],
+    "frontend": ["frontend/src/**/*.test.{ts,tsx}"]
+  },
+  "evidenceGlobs": {
+    "backend": ["backend/tests/**/__evidence__/*.test.ts"],
+    "frontend": ["frontend/src/**/__evidence__/*.test.{ts,tsx}"]
+  },
+  "sourceGlobs": {
+    "backend": ["backend/src/**/*.ts"],
+    "frontend": ["frontend/src/**/*.{ts,tsx}"]
+  },
+  "sourceIgnore": ["**/*.test.{ts,tsx}", "**/*.stories.tsx"],
+  "configGlobs": [
+    "{backend,frontend}/vitest.config.*",
+    "{backend,frontend}/vite.config.*",
+    "{backend,frontend}/tsconfig*.json"
+  ],
+  "dependencyFiles": [
+    "backend/package.json",
+    "backend/package-lock.json",
+    "frontend/package.json",
+    "frontend/package-lock.json"
+  ],
+  "secretGlobs": ["**/.env", "**/.env.*", "!**/.env.example"],
+  "skipMinChangedLineCoverage": 0.8,
+  "forbiddenTestCalls": [
+    ".skip(",
+    ".only(",
+    ".todo(",
+    ".fails(",
+    "xit(",
+    "xdescribe(",
+    ".skipIf(",
+    ".runIf("
+  ],
+  "forbiddenAssertions": [
+    "toMatchSnapshot(",
+    "toMatchInlineSnapshot(",
+    "toMatchFileSnapshot(",
+    "toThrowErrorMatchingSnapshot(",
+    "toThrowErrorMatchingInlineSnapshot("
+  ],
+  "prismaSchemaPath": "backend/prisma/schema.prisma",
+  "allowedPrismaGenerators": ["prisma-client", "prisma-client-js"]
+}

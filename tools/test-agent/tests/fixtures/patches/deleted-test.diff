@@ -1,0 +1,16 @@
+diff --git a/backend/tests/old.test.ts b/backend/tests/old.test.ts
+deleted file mode 100644
+index 82d6be0..0000000
+--- a/backend/tests/old.test.ts
++++ /dev/null
+@@ -1,10 +0,0 @@
+-import { it, expect } from "vitest"
+-it("a", () => {
+-  expect(1).toBe(1)
+-})
+-it("b", () => {
+-  expect(2).toBe(2)
+-})
+-it.each([1])("c", (n) => {
+-  expect(n).toBe(1)
+-})

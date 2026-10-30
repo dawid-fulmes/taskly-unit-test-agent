@@ -1,0 +1,8 @@
+diff --git a/backend/tests/exec.test.ts b/backend/tests/exec.test.ts
+new file mode 100755
+index 0000000..49fb18b
+--- /dev/null
++++ b/backend/tests/exec.test.ts
+@@ -0,0 +1,2 @@
++import { it, expect } from 'vitest'
++it('x', () => { expect(1).toBe(1) })

@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Skill",
+      "Bash(test-agent-run:*)"
+    ],
+    "deny": ["WebFetch", "WebSearch", "Bash(curl:*)", "Bash(wget:*)"]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$TEST_AGENT_TRUSTED_DIR/tools/test-agent/src/cli/guard.ts\""
+          }
+        ]
+      }
+    ]
+  },
+  "enableAllProjectMcpServers": false
+}
