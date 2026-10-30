@@ -1,11 +1,24 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { readdirSync } from 'node:fs'
 import { parseArgs } from 'node:util'
+
+/** Repo-relative paths of regular files under root (skips .git and node_modules, never follows symlinks). */
+function walk(root: string, rel: string): string[] {
+  const out: string[] = []
+  for (const e of readdirSync(join(root, rel), { withFileTypes: true })) {
+    if (e.name === '.git' || e.name === 'node_modules') continue
+    const p = rel === '' ? e.name : `${rel}/${e.name}`
+    if (e.isDirectory()) out.push(...walk(root, p))
+    else if (e.isFile()) out.push(p)
+  }
+  return out
+}
 
 // Fail closed: node: built-ins only are imported statically; everything else loads inside try.
 try {
   const { exec } = await import('../exec.ts')
-  const { loadPolicy } = await import('../policy.ts')
+  const { loadPolicy, isTestPath } = await import('../policy.ts')
   const { buildPlan, renamedIntoSource } = await import('../plan.ts')
   const { readCoverageExcludes } = await import('../config-excludes.ts')
   const { buildBackfillPlan, normalizeCoverage } =
@@ -60,15 +73,22 @@ try {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
       throw new Error('invalid --coverage')
     if (Object.keys(raw).length === 0) throw new Error('empty --coverage')
+    const policy = loadPolicy()
     const plan = buildBackfillPlan({
       cov: normalizeCoverage(raw, '/app', app),
       app,
-      policy: loadPolicy(),
+      policy,
       maxFiles,
       excludes: readExcludes(app),
       baseSha: base,
     })
-    writeFileSync(need('out'), `${JSON.stringify(plan, null, 2)}\n`)
+    const testFiles = walk(trusted, '')
+      .filter((p) => isTestPath(policy, p))
+      .sort()
+    writeFileSync(
+      need('out'),
+      `${JSON.stringify({ ...plan, testFiles }, null, 2)}\n`,
+    )
     process.exit(0)
   }
 
@@ -115,6 +135,12 @@ try {
       text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0)
   }
 
+  const tree = await git('ls-tree', '-r', '-z', '--name-only', head)
+  const testFiles = tree
+    .split('\0')
+    .filter((p) => p !== '' && isTestPath(policy, p))
+    .sort()
+
   const plan = buildPlan({
     newFileLineCounts,
     mode: 'pr',
@@ -128,7 +154,10 @@ try {
       frontend: readExcludes('frontend'),
     },
   })
-  writeFileSync(need('out'), `${JSON.stringify(plan, null, 2)}\n`)
+  writeFileSync(
+    need('out'),
+    `${JSON.stringify({ ...plan, testFiles }, null, 2)}\n`,
+  )
 } catch (error) {
   process.stderr.write(
     `plan failure: ${error instanceof Error ? error.message : String(error)}\n`,

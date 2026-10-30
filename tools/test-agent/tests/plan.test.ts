@@ -177,6 +177,10 @@ describe('plan CLI', () => {
     await git('init', '-q', '-b', 'main')
     mkdirSync(join(dir, 'backend/src'), { recursive: true })
     writeFileSync(join(dir, 'backend/src/a.ts'), 'a\nb\n')
+    mkdirSync(join(dir, 'backend/tests/__evidence__'), { recursive: true })
+    writeFileSync(join(dir, 'backend/tests/a.test.ts'), 'x\n')
+    writeFileSync(join(dir, 'backend/tests/__evidence__/e.test.ts'), 'x\n')
+    writeFileSync(join(dir, 'backend/tests/fixture.ts'), 'x\n')
     await git('add', '.')
     await git('commit', '-qm', 'base')
     const base = (await git('rev-parse', 'HEAD')).stdout.trim()
@@ -225,6 +229,8 @@ describe('plan CLI', () => {
     const plan = JSON.parse(readFileSync(out, 'utf8'))
     expect(plan.manifest[0].path).toBe('backend/src/a.ts')
     expect(plan.manifest[0].changedLines).toEqual([3])
+    // Discovery aid for the agent: existing test files on head (evidence and helpers excluded).
+    expect(plan.testFiles).toEqual(['backend/tests/a.test.ts'])
     const bad = await exec('node', [cli, '--mode', 'pr'])
     expect(bad.code).not.toBe(0)
   })
@@ -339,5 +345,60 @@ describe('plan CLI', () => {
     expect(m.map((e: { path: string }) => e.path)).toContain(
       'backend/src/we ird "q" caf\u00e9.ts',
     )
+  })
+})
+
+describe('plan CLI backfill', () => {
+  it('lists existing test files from the trusted tree', async () => {
+    const trusted = mkdtempSync(join(tmpdir(), 'plan-bf-'))
+    const cfg = "export default { test: { coverage: { exclude: ['x/**'] } } }"
+    mkdirSync(join(trusted, 'backend/tests/__evidence__'), { recursive: true })
+    mkdirSync(join(trusted, 'backend/node_modules/pkg/tests'), {
+      recursive: true,
+    })
+    mkdirSync(join(trusted, 'frontend/src/a'), { recursive: true })
+    writeFileSync(join(trusted, 'backend/vitest.config.ts'), cfg)
+    writeFileSync(join(trusted, 'frontend/vite.config.ts'), cfg)
+    writeFileSync(join(trusted, 'backend/tests/r.test.ts'), 'x\n')
+    writeFileSync(join(trusted, 'backend/tests/__evidence__/e.test.ts'), 'x\n')
+    writeFileSync(join(trusted, 'backend/node_modules/pkg/tests/n.test.ts'), 'x\n')
+    writeFileSync(join(trusted, 'frontend/src/a/B.test.tsx'), 'x\n')
+    const coverage = join(trusted, 'coverage.json')
+    writeFileSync(
+      coverage,
+      JSON.stringify({
+        '/app/src/x.ts': {
+          path: '/app/src/x.ts',
+          statementMap: { '0': { start: { line: 1 }, end: { line: 1 } } },
+          s: { '0': 0 },
+        },
+      }),
+    )
+    const out = join(trusted, 'plan.json')
+    const cli = new URL('../src/cli/plan.ts', import.meta.url).pathname
+    const r = await exec('node', [
+      cli,
+      '--mode',
+      'backfill',
+      '--app',
+      'backend',
+      '--max-files',
+      '8',
+      '--coverage',
+      coverage,
+      '--trusted',
+      trusted,
+      '--base',
+      'a'.repeat(40),
+      '--out',
+      out,
+    ])
+    expect(r.stderr).toBe('')
+    expect(r.code).toBe(0)
+    const plan = JSON.parse(readFileSync(out, 'utf8'))
+    expect(plan.testFiles).toEqual([
+      'backend/tests/r.test.ts',
+      'frontend/src/a/B.test.tsx',
+    ])
   })
 })

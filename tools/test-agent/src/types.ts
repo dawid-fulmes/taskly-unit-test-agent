@@ -39,4 +39,6 @@ export interface Plan {
   dependenciesChanged: boolean
   testsRemovedByAuthor: { file: string; count: number }[]
   budgetProfile: 'default' | 'large' | 'backfill'
+  /** Existing test files on the analysed tree, a discovery aid for the agent (no decisions use it). */
+  testFiles?: string[]
 }

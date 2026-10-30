@@ -52,6 +52,19 @@ export function typecheckOf(run: StepRun): boolean | { error: string } {
   return { error: `exit ${code} without a TS diagnostic` }
 }
 
+const SHOWN_DIAGNOSTICS = 3
+
+/** The first tsc diagnostics of a failed typecheck, one per line, for the PR comment. */
+function firstDiagnostics(run: StepRun): string {
+  const lines = `${run.result.stdout}\n${run.result.stderr}`
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /\berror TS\d+:/.test(l))
+  const shown = lines.slice(0, SHOWN_DIAGNOSTICS).map((l) => l.slice(0, 300))
+  const more = lines.length - shown.length
+  return shown.join('\n') + (more > 0 ? `\n(+${more} more)` : '')
+}
+
 /** The guard's runner argument rules (safe characters, no options, no traversal) for a repo path. */
 export function runnable(
   policy: Policy,
@@ -85,11 +98,12 @@ export async function runSuites(
   for (const app of APPS) {
     const source = path.join(workDir, app)
     log(`${phase} ${app} typecheck`)
-    const tc = typecheckOf(
-      await runStep(env, `${phase}-${app}-typecheck`, app, source, {
-        command: TYPECHECK,
-      }),
-    )
+    const tcRun = await runStep(env, `${phase}-${app}-typecheck`, app, source, {
+      command: TYPECHECK,
+    })
+    const tc = typecheckOf(tcRun)
+    if (tc === false)
+      notes.push(`${phase} ${app} typecheck errors: ${firstDiagnostics(tcRun)}`)
     log(`${phase} ${app} suite`)
     const run = await runStep(env, `${phase}-${app}-suite`, app, source, {
       command: vitestCommand({ coverage: true, outputName: OUT }),

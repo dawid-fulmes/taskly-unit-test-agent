@@ -1,6 +1,8 @@
 export interface TranscriptSummary {
   skills: string[]
   toolUseIds: string[]
+  /** Tool uses the harness rejected because the tool does not exist: they never ran and no hook fired. */
+  unavailableToolUseIds: string[]
   costUsd: number | null
   turns: number | null
   stop: 'success' | 'max-turns' | 'max-budget' | 'error' | 'unknown'
@@ -31,9 +33,10 @@ function mapStop(
   subtype: unknown,
   isError: unknown,
 ): TranscriptSummary['stop'] {
-  if (isError === true) return 'error'
-  if (typeof subtype !== 'string') return 'unknown'
-  if (subtype === 'success') return 'success'
+  // Limit stops arrive with is_error: true, so the subtype decides first; is_error only
+  // downgrades an otherwise successful result.
+  if (typeof subtype !== 'string') return isError === true ? 'error' : 'unknown'
+  if (subtype === 'success') return isError === true ? 'error' : 'success'
   if (subtype.includes('budget')) return 'max-budget'
   if (subtype === 'error_max_turns') return 'max-turns'
   if (subtype.startsWith('error')) return 'error'
@@ -43,6 +46,18 @@ function mapStop(
 const finite = (v: unknown) =>
   typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null
 
+// Exact harness wording for a call to a tool that does not exist in the session.
+const UNAVAILABLE_TOOL = '<tool_use_error>Error: No such tool available:'
+
+function resultText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    const first = content[0]
+    if (isObj(first) && typeof first.text === 'string') return first.text
+  }
+  return ''
+}
+
 /** Derives run facts from Claude Code `--output-format stream-json --verbose` output; never trusts the report. */
 export function summarizeTranscript(jsonl: string): TranscriptSummary {
   const { objs, invalid } = parseLines(jsonl)
@@ -50,6 +65,7 @@ export function summarizeTranscript(jsonl: string): TranscriptSummary {
   const toolUseIds: string[] = []
   const seenIds = new Set<string>()
   const failed = new Set<string>()
+  const unavailable = new Set<string>()
   const skillCalls: { id: string; skill: string }[] = []
   let result: Obj | null = null
   for (const o of objs) {
@@ -59,8 +75,11 @@ export function summarizeTranscript(jsonl: string): TranscriptSummary {
     for (const b of content) {
       if (!isObj(b)) continue
       if (b.type === 'tool_result') {
-        if (b.is_error === true && typeof b.tool_use_id === 'string')
+        if (b.is_error === true && typeof b.tool_use_id === 'string') {
           failed.add(b.tool_use_id)
+          if (resultText(b.content).startsWith(UNAVAILABLE_TOOL))
+            unavailable.add(b.tool_use_id)
+        }
         continue
       }
       if (b.type !== 'tool_use') continue
@@ -80,6 +99,7 @@ export function summarizeTranscript(jsonl: string): TranscriptSummary {
   return {
     skills,
     toolUseIds,
+    unavailableToolUseIds: toolUseIds.filter((id) => unavailable.has(id)),
     costUsd: result ? finite(result.total_cost_usd) : null,
     turns: result ? finite(result.num_turns) : null,
     stop: result ? mapStop(result.subtype, result.is_error) : 'unknown',

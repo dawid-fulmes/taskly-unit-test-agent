@@ -99,7 +99,9 @@ function unguardedToolUses(
 ): string[] {
   if (transcript === null) return ['(transcript missing)']
   const t = summarizeTranscript(transcript)
-  const out = guardCoverage(t.toolUseIds, guardLog ?? '')
+  // A call to a tool that does not exist never ran, so no hook fired for it.
+  const ran = t.toolUseIds.filter((id) => !t.unavailableToolUseIds.includes(id))
+  const out = guardCoverage(ran, guardLog ?? '')
   // Unparseable lines could hide tool uses: fail closed.
   if (t.invalidLines > 0)
     out.unshift(`(${t.invalidLines} unparseable transcript lines)`)

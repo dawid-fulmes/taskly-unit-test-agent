@@ -35,6 +35,7 @@ describe('summarizeTranscript', () => {
     expect(summarizeTranscript(jsonl)).toEqual({
       skills: ['unit-test-agent', 'other'],
       toolUseIds: ['t1', 't2', 't3', 't4'],
+      unavailableToolUseIds: [],
       costUsd: 1.25,
       turns: 7,
       stop: 'success',
@@ -83,11 +84,24 @@ describe('summarizeTranscript', () => {
 describe('summarizeTranscript hardening', () => {
   const result = (o: object) =>
     line({ type: 'result', subtype: 'success', ...o })
-  it('maps is_error to error regardless of subtype', () => {
+  it('maps is_error on a success subtype to error', () => {
     expect(summarizeTranscript(result({ is_error: true })).stop).toBe('error')
     expect(summarizeTranscript(result({ is_error: false })).stop).toBe(
       'success',
     )
+  })
+  // Observed with Claude Code 2.1.287: limit stops carry is_error: true.
+  it('keeps limit subtypes distinct even when is_error is true', () => {
+    expect(
+      summarizeTranscript(
+        result({ subtype: 'error_max_budget_usd', is_error: true }),
+      ).stop,
+    ).toBe('max-budget')
+    expect(
+      summarizeTranscript(
+        result({ subtype: 'error_max_turns', is_error: true }),
+      ).stop,
+    ).toBe('max-turns')
   })
   it('excludes failed Skill calls from skills but keeps their ids', () => {
     const r = summarizeTranscript(
@@ -163,6 +177,47 @@ describe('summarizeTranscript hardening', () => {
       [assistant(tool('d', 'Read')), assistant(tool('d', 'Read'))].join('\n'),
     )
     expect(r.toolUseIds).toEqual(['d'])
+  })
+})
+
+describe('unavailable tools', () => {
+  // Observed with Claude Code 2.1.287: Glob does not exist, the harness answers the call with an
+  // error and no hook runs. Such a call never executed, so it needs no guard record.
+  it('lists tool uses rejected as "No such tool available"', () => {
+    const jsonl = [
+      assistant(tool('g1', 'Glob', { pattern: '**/*' })),
+      line({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'g1',
+              is_error: true,
+              content:
+                '<tool_use_error>Error: No such tool available: Glob. Glob is not available in this session</tool_use_error>',
+            },
+          ],
+        },
+      }),
+      assistant(tool('r1', 'Read', { file_path: 'x' })),
+      line({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'r1',
+              is_error: true,
+              content: 'denied by hook: No such tool available',
+            },
+          ],
+        },
+      }),
+    ].join('\n')
+    const t = summarizeTranscript(jsonl)
+    expect(t.unavailableToolUseIds).toEqual(['g1'])
+    expect(t.toolUseIds).toEqual(['g1', 'r1'])
   })
 })
 

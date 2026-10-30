@@ -320,6 +320,27 @@ describe('runVerify rejections and failures', () => {
     expect(v.reasons).toContain('backend: typecheck fails after the patch')
   })
 
+  it('lists the first TS diagnostics so the author can see what to fix', async () => {
+    const diagnostics = [1, 2, 3, 4]
+      .map((n) => `tests/router.test.ts(${n},1): error TS2345: problem ${n}.`)
+      .join('\n')
+    w.onDocker = async (run, defaults) =>
+      run.step === 'baseline-backend-typecheck'
+        ? { code: 2, stdout: `${diagnostics}\nFound 4 errors.` }
+        : defaults()
+    const v = await verify()
+    expect(v.outcome).toBe('baseline-failing')
+    const reasons = v.reasons.join('\n')
+    expect(reasons).toContain(
+      'tests/router.test.ts(1,1): error TS2345: problem 1.',
+    )
+    expect(reasons).toContain(
+      'tests/router.test.ts(3,1): error TS2345: problem 3.',
+    )
+    expect(reasons).not.toContain('problem 4.')
+    expect(reasons).toContain('(+1 more)')
+  })
+
   it.each([1, 2])(
     'typecheck exit %i without a TS diagnostic is unusable (pipeline-error)',
     async (code) => {
@@ -438,6 +459,39 @@ describe('runVerify agent-phase outcomes run nothing', () => {
     expect(v.outcome).toBe('agent-run-invalid')
     expect(v.reasons.join('\n')).toMatch(/toolu_1/)
     expect(w.calls).toEqual([])
+  })
+
+  it('a call to a tool that does not exist needs no guard record', async () => {
+    const transcript = await fs.readFile(w.args.transcriptPath, 'utf8')
+    const extra = [
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [{ type: 'tool_use', id: 'toolu_glob', name: 'Glob', input: {} }],
+        },
+      }),
+      JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_glob',
+              is_error: true,
+              content:
+                '<tool_use_error>Error: No such tool available: Glob.</tool_use_error>',
+            },
+          ],
+        },
+      }),
+    ]
+    await fs.writeFile(
+      w.args.transcriptPath,
+      [...extra, transcript].join('\n'),
+    )
+    const v = await verify()
+    expect(v.outcome).not.toBe('agent-run-invalid')
+    expect(v.reasons.join('\n')).not.toMatch(/toolu_glob/)
   })
 
   it('missing transcript is agent-run-invalid', async () => {
