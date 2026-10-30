@@ -28,8 +28,8 @@ const appNumbers = (): AppNumbers => ({
     },
     {
       file: 'backend/src/e.ts',
-      before: { status: 'missing', covered: 0, total: 0, pct: null },
-      after: null,
+      before: { status: 'missing', covered: 0, total: 0, pct: 0 },
+      after: { status: 'missing', covered: 0, total: 0, pct: 0 },
     },
   ],
   appLines: null,
@@ -143,7 +143,8 @@ describe('hostile model text (Review Focus 4)', () => {
     })
     expect(out).toContain(`@${ZWJ}org`)
     expect(out).not.toMatch(/@(?!‍)/)
-    expect(out).not.toContain('<img')
+    // Inside code fences HTML is inert; outside them it must be escaped.
+    expect(out.replace(/(`{3,})[\s\S]*?\n\1/g, '')).not.toContain('<img')
     expect(count(out, '<details>')).toBe(count(out, '</details>'))
     expect(count(out, '</details>')).toBe(2) // defect + narrative
     expect(count(out, COMMENT_MARKER)).toBe(1)
@@ -157,6 +158,63 @@ describe('hostile model text (Review Focus 4)', () => {
       meta(),
     )
     expect(out).toContain('\n``````text\n')
+  })
+})
+
+describe('autolinks, invisibles and fences', () => {
+  it('breaks issue refs, URLs, SHAs and emoji codes', () => {
+    const out = escapeModelText(
+      'fixes #123 org/repo#45 GH-9 https://evil.example/x deadbeefcafe :shipit:',
+    )
+    expect(out).not.toMatch(/#\d/)
+    expect(out).not.toContain('://')
+    expect(out).not.toContain('GH-9')
+    expect(out).not.toContain('deadbeefcafe')
+    expect(out).not.toContain(':shipit:')
+    expect(out).toContain(`#${ZWJ}123`)
+    expect(out).toContain(`org/repo#${ZWJ}45`)
+    expect(out).toContain(`:/${ZWJ}/evil`)
+    expect(out).toContain(`deadbe${ZWJ}efcafe`)
+    expect(out).toContain(`:${ZWJ}shipit:`)
+  })
+
+  it('strips bidi and invisible controls before neutralising', () => {
+    const out = escapeModelText('a\u202Eb\u200Bc\uFEFF\u2066d @x')
+    expect(out).toBe(`abcd @${ZWJ}x`)
+  })
+
+  it('keeps narrative text raw inside the fence but neutral', () => {
+    const out = renderComment(
+      verdict(),
+      report({
+        narrative: 'a & b <DETAILS> ~~~\n@bob <!-- test-agent:report -->\u202E',
+      }),
+      meta(),
+    )
+    expect(out).toContain('a & b')
+    expect(out).not.toContain('<DETAILS>')
+    expect(out).not.toContain('\u202E')
+    expect(out).toContain(`@${ZWJ}bob`)
+    expect(count(out, COMMENT_MARKER)).toBe(1)
+    expect(count(out, '<details>')).toBe(count(out, '</details>'))
+  })
+
+  it('caps table cells at 500 chars', () => {
+    const out = renderComment(
+      verdict({
+        files: [
+          {
+            path: 'backend/src/a.ts',
+            action: 'skip',
+            details: 'z'.repeat(900),
+          },
+        ],
+      }),
+      report(),
+      meta(),
+    )
+    expect(out).not.toContain('z'.repeat(501))
+    expect(out).toContain('z'.repeat(499) + '…')
   })
 })
 
@@ -257,9 +315,26 @@ describe('sections', () => {
     expect(out).toContain('Config changed')
   })
 
-  it('renders unknown coverage as n/a, never as 0% or 100%', () => {
-    const out = renderComment(verdict(), report(), meta())
-    expect(out).toContain('| backend/src/e.ts | n/a → n/a |')
+  it('renders missing, excluded, unknown and absent coverage distinctly', () => {
+    const v = verdict()
+    v.numbers.backend.changedLines.push(
+      {
+        file: 'backend/src/x.ts',
+        before: { status: 'excluded', covered: 0, total: 0, pct: null },
+        after: null,
+      },
+      {
+        file: 'backend/src/u.ts',
+        before: { status: 'measured', covered: 0, total: 0, pct: null },
+        after: null,
+      },
+    )
+    const out = renderComment(v, report(), meta())
+    expect(out).toContain(
+      '| backend/src/e.ts | 0% (not in coverage report) → 0% (not in coverage report) |',
+    )
+    expect(out).toContain('| backend/src/x.ts | excluded from coverage → n/a |')
+    expect(out).toContain('| backend/src/u.ts | n/a → n/a |')
     expect(out).toContain('| backend/src/a.ts | 0% (0/4) → 100% (4/4) |')
   })
 

@@ -63,6 +63,22 @@ const RETRY_HINT_OUTCOMES = new Set<Outcome>([
   'skip-unverified',
 ])
 
+/** Removes bidi and invisible control characters from model text. */
+function stripInvisible(s: string): string {
+  return s.replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g, '')
+}
+
+/** Breaks GitHub autolinks (issue refs, URLs, SHAs, emoji codes) so no cross-reference events fire. */
+function breakAutolinks(s: string): string {
+  return s
+    .replace(/#(?=\d)/g, `#${ZWJ}`)
+    .replace(/\bGH-(?=\d)/gi, `GH-${ZWJ}`)
+    .replace(/:\/\//g, `:/${ZWJ}/`)
+    .replace(/\bwww\./gi, `www${ZWJ}.`)
+    .replace(/\b([0-9a-f]{6})(?=[0-9a-f]{1,34}\b)/gi, `$1${ZWJ}`)
+    .replace(/:(?=[a-z0-9_+-]+:)/gi, `:${ZWJ}`)
+}
+
 /** HTML-escapes and neutralises mentions; never produces the comment marker. */
 function htmlSafe(s: string): string {
   return s
@@ -76,7 +92,7 @@ function htmlSafe(s: string): string {
 
 /** Single-line, Markdown- and HTML-inert text, safe inside table cells, list items and prose. */
 export function escapeModelText(s: string): string {
-  return htmlSafe(s)
+  return htmlSafe(breakAutolinks(stripInvisible(s)))
     .replace(/\\/g, '\\\\')
     .replace(/`/g, '\\`')
     .replace(/\|/g, '\\|')
@@ -87,7 +103,7 @@ export function escapeModelText(s: string): string {
 
 /** HTML-only variant for text inside `<summary>`, where Markdown is not parsed. */
 function summaryText(s: string): string {
-  return htmlSafe(s).replace(/\s+/g, ' ')
+  return htmlSafe(stripInvisible(s)).replace(/\s+/g, ' ')
 }
 
 function fence(content: string, lang = 'text'): string {
@@ -105,14 +121,16 @@ function truncate(s: string, max: number): string {
 
 /** For text inside a code fence: no HTML escaping, but no mentions, marker or details tags either. */
 function fenceSafe(s: string): string {
-  return s
+  return stripInvisible(s)
     .replace(/@/g, `@${ZWJ}`)
     .replace(/<(?=\/?details|\/?summary|!--)/gi, `<${ZWJ}`)
 }
 
 function pct(r: CoverageResult | null): string {
   if (r === null) return 'n/a'
-  if (r.status === 'excluded') return 'excluded'
+  if (r.status === 'excluded') return 'excluded from coverage'
+  // ADR 0012: a file missing from the coverage report counts as 0%.
+  if (r.status === 'missing') return '0% (not in coverage report)'
   if (r.pct === null || !Number.isFinite(r.pct)) return 'n/a'
   return `${Math.round(r.pct * 100)}% (${r.covered}/${r.total})`
 }
@@ -127,8 +145,12 @@ function mark(b: boolean | null): string {
   return b === null ? 'n/a' : b ? 'pass' : 'fail'
 }
 
+const MAX_CELL = 500
+
 function cell(s: string): string {
-  return escapeModelText(s)
+  return escapeModelText(
+    s.length > MAX_CELL ? `${s.slice(0, MAX_CELL - 1)}…` : s,
+  )
 }
 
 interface Sections {
@@ -331,7 +353,7 @@ function narrativeSection(report: Report): string[] {
     '<details>',
     '<summary>Model narrative (untrusted, not used for any status)</summary>',
     '',
-    fence(htmlSafe(truncate(report.narrative, MAX_NARRATIVE))),
+    fence(fenceSafe(truncate(report.narrative, MAX_NARRATIVE))),
     '',
     '</details>',
   ]
