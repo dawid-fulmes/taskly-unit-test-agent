@@ -300,10 +300,12 @@ jobs:
 
   publish:
     needs: [plan, generate, verify]
-    if: ${{ !cancelled() }}
+    # A run superseded by a newer one (job-level concurrency) posts nothing; the newer run reports.
+    if: ${{ !cancelled() && needs.plan.result != 'cancelled' && needs.generate.result != 'cancelled' && needs.verify.result != 'cancelled' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    environment: ${{ inputs.mode == 'backfill' && 'test-agent-backfill' || 'test-agent-pr' }}
+    # Holds only the App key here. Backfill approval is required once, on generate (model key).
+    environment: test-agent-pr
     permissions:
       contents: read
     concurrency:

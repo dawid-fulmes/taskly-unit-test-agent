@@ -1,7 +1,8 @@
 name: test-agent prepare
 description: >
   Installs the trusted test-agent tooling and, optionally, the work tree's app dependencies without
-  lifecycle scripts (ADR 0009). Must be used from the trusted checkout. No secret is available here.
+  lifecycle scripts inside the pinned container (ADR 0009). Must be used from the trusted checkout.
+  No secret is available here.
 inputs:
   trusted:
     description: Path of the trusted (base) checkout.
@@ -24,21 +25,28 @@ runs:
       shell: bash
       working-directory: ${{ inputs.trusted }}/tools/test-agent
       run: npm ci --ignore-scripts --no-audit --no-fund
-    - name: Install work dependencies without lifecycle scripts
-      if: inputs.work != ''
-      shell: bash
-      env:
-        WORK: ${{ inputs.work }}
-      run: |
-        for app in backend frontend; do
-          (cd "$WORK/$app" && npm ci --ignore-scripts --no-audit --no-fund)
-        done
     - name: Pull the runner image
       if: inputs.image != ''
       shell: bash
       env:
         IMAGE: ${{ inputs.image }}
       run: docker pull --quiet "$IMAGE"
+    - name: Install work dependencies without lifecycle scripts, inside the container
+      # npm still reads the PR's own .npmrc (e.g. `git=./script`) with --ignore-scripts, so the
+      # install runs in the throwaway container: nothing PR-controlled ever runs on this host.
+      if: inputs.work != ''
+      shell: bash
+      env:
+        WORK: ${{ inputs.work }}
+        IMAGE: ${{ inputs.image }}
+      run: |
+        [ -n "$IMAGE" ] || { echo "prepare: a work install needs the runner image" >&2; exit 1; }
+        root="$(realpath "$WORK")"
+        for app in backend frontend; do
+          docker run --rm --user "$(id -u):$(id -g)" --env-file /dev/null -e HOME=/tmp \
+            --cap-drop ALL --security-opt no-new-privileges \
+            -v "$root/$app:/app" -w /app "$IMAGE" npm ci --ignore-scripts --no-audit --no-fund
+        done
     - name: Put test-agent-run on PATH
       shell: bash
       env:

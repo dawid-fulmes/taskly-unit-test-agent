@@ -145,6 +145,12 @@ describe('decide', () => {
     ['Agent', {}],
     ['NotebookEdit', {}],
     ['mcp__github__create_branch', {}],
+    // Only the six trusted skills; a PR can plant `.claude/skills` in nested directories.
+    ['Skill', { skill: 'evil' }],
+    ['Skill', { skill: 'backend:evil' }],
+    ['Skill', { skill: '../analyze-change' }],
+    ['Skill', {}],
+    ['Skill', { skill: ['analyze-change'] }],
   ])('denies %s %j', (tool, toolInput) => {
     expect(d(tool, toolInput).allow).toBe(false)
   })
@@ -185,6 +191,11 @@ describe('decide', () => {
       },
     ],
     ['Skill', { skill: 'analyze-change' }],
+    ['Skill', { skill: 'derive-test-intent' }],
+    ['Skill', { skill: 'backend-unit-tests' }],
+    ['Skill', { skill: 'frontend-unit-tests' }],
+    ['Skill', { skill: 'run-and-triage' }],
+    ['Skill', { skill: 'test-report' }],
   ])('allows %s %j', (tool, toolInput) => {
     expect(d(tool, toolInput).allow).toBe(true)
   })
@@ -268,7 +279,7 @@ describe('guard CLI', () => {
     cli(
       JSON.stringify({
         tool_name: 'Skill',
-        tool_input: {},
+        tool_input: { skill: 'analyze-change' },
         tool_use_id: 'toolu_2',
       }),
     )

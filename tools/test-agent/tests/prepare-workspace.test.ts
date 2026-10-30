@@ -4,6 +4,9 @@ import {
   writeFileSync,
   existsSync,
   readFileSync,
+  rmSync,
+  symlinkSync,
+  lstatSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -37,6 +40,8 @@ function fixture() {
   put(work, 'frontend/src/.mcp.json', '{}')
   put(work, '.mcp.json', '{}')
   put(work, 'backend/src/app.ts', 'export {}')
+  put(work, 'backend/.claude/skills/evil/SKILL.md', 'nested skill')
+  put(work, 'frontend/src/features/.claude/settings.json', '{}')
   return { trusted, work }
 }
 
@@ -68,7 +73,23 @@ describe('prepare-workspace', () => {
       '.mcp.json',
     ])
       expect(existsSync(path.join(work, gone))).toBe(false)
+    expect(existsSync(path.join(work, 'backend/.claude'))).toBe(false)
+    expect(existsSync(path.join(work, 'frontend/src/features/.claude'))).toBe(
+      false,
+    )
     expect(existsSync(path.join(work, 'backend/src/app.ts'))).toBe(true)
+  })
+
+  it('replaces a .claude symlink at the root instead of following it', () => {
+    const { trusted, work } = fixture()
+    const outside = path.join(path.dirname(work), 'outside')
+    put(outside, 'agents/evil.md', 'evil')
+    rmSync(path.join(work, '.claude'), { recursive: true, force: true })
+    symlinkSync(outside, path.join(work, '.claude'))
+    expect(run(['--trusted', trusted, '--work', work]).status).toBe(0)
+    expect(lstatSync(path.join(work, '.claude')).isSymbolicLink()).toBe(false)
+    expect(existsSync(path.join(outside, 'agents/evil.md'))).toBe(true)
+    expect(existsSync(path.join(work, '.claude/agents/evil.md'))).toBe(false)
   })
 
   it('fails closed when an argument is missing', () => {

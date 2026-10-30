@@ -29,6 +29,17 @@ export interface Decision {
 const allow = (reason: string): Decision => ({ allow: true, reason })
 const deny = (reason: string): Decision => ({ allow: false, reason })
 
+// The skills shipped in the trusted .claude/skills. A PR can plant other skills (e.g. in a nested
+// backend/.claude/skills), so loading is restricted by name, not by where Claude Code found them.
+const TRUSTED_SKILLS = new Set([
+  'analyze-change',
+  'derive-test-intent',
+  'backend-unit-tests',
+  'frontend-unit-tests',
+  'run-and-triage',
+  'test-report',
+])
+
 const BASH_PATTERN = /^test-agent-run (backend|frontend)( [A-Za-z0-9_./@-]+)+$/
 
 /**
@@ -283,7 +294,9 @@ export function decide(input: HookInput, ctx: GuardContext): Decision {
     case 'Bash':
       return decideBash(toolInput, ctx)
     case 'Skill':
-      return allow('skills are allowed')
+      return TRUSTED_SKILLS.has(toolInput.skill as string)
+        ? allow('trusted skill')
+        : deny('only the trusted test-agent skills may be loaded')
     default:
       return deny(`tool not allowed: ${String(input.tool_name)}`)
   }

@@ -48,7 +48,7 @@ try {
     .split('\0')
     .filter(
       (p) =>
-        p.startsWith('.claude/') ||
+        p.split('/').includes('.claude') ||
         INSTRUCTION_FILES.has(p.split('/').pop() ?? ''),
     )
   if (tracked.length > 0)

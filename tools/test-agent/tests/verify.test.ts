@@ -467,7 +467,9 @@ describe('runVerify agent-phase outcomes run nothing', () => {
       JSON.stringify({
         type: 'assistant',
         message: {
-          content: [{ type: 'tool_use', id: 'toolu_glob', name: 'Glob', input: {} }],
+          content: [
+            { type: 'tool_use', id: 'toolu_glob', name: 'Glob', input: {} },
+          ],
         },
       }),
       JSON.stringify({
@@ -485,10 +487,7 @@ describe('runVerify agent-phase outcomes run nothing', () => {
         },
       }),
     ]
-    await fs.writeFile(
-      w.args.transcriptPath,
-      [...extra, transcript].join('\n'),
-    )
+    await fs.writeFile(w.args.transcriptPath, [...extra, transcript].join('\n'))
     const v = await verify()
     expect(v.outcome).not.toBe('agent-run-invalid')
     expect(v.reasons.join('\n')).not.toMatch(/toolu_glob/)

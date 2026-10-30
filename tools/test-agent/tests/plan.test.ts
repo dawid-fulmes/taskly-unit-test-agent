@@ -361,7 +361,10 @@ describe('plan CLI backfill', () => {
     writeFileSync(join(trusted, 'frontend/vite.config.ts'), cfg)
     writeFileSync(join(trusted, 'backend/tests/r.test.ts'), 'x\n')
     writeFileSync(join(trusted, 'backend/tests/__evidence__/e.test.ts'), 'x\n')
-    writeFileSync(join(trusted, 'backend/node_modules/pkg/tests/n.test.ts'), 'x\n')
+    writeFileSync(
+      join(trusted, 'backend/node_modules/pkg/tests/n.test.ts'),
+      'x\n',
+    )
     writeFileSync(join(trusted, 'frontend/src/a/B.test.tsx'), 'x\n')
     const coverage = join(trusted, 'coverage.json')
     writeFileSync(

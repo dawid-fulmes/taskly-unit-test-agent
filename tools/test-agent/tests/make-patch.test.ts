@@ -137,6 +137,29 @@ describe('make-patch', () => {
     expect(patch).toContain('backend/tests/new.test.ts')
   })
 
+  it('restores nested .claude directories tracked by head', () => {
+    const { dir } = repo()
+    mkdirSync(path.join(dir, 'backend/.claude/skills/x'), { recursive: true })
+    writeFileSync(
+      path.join(dir, 'backend/.claude/skills/x/SKILL.md'),
+      'head skill\n',
+    )
+    git(dir, 'add', '.')
+    git(dir, 'commit', '-q', '-m', 'nested agent config')
+    const head = git(dir, 'rev-parse', 'HEAD')
+    rmSync(path.join(dir, 'backend/.claude'), { recursive: true }) // what prepare-workspace does
+    const out = path.join(dir, '..', `${path.basename(dir)}-n.diff`)
+    const r = spawnSync(
+      process.execPath,
+      [cli, '--work', dir, '--head', head, '--out', out],
+      {
+        encoding: 'utf8',
+      },
+    )
+    expect(r.status).toBe(0)
+    expect(readFileSync(out, 'utf8')).not.toContain('.claude/')
+  })
+
   it('drops an untracked .claude directory that head does not have', () => {
     const { dir, head } = repo()
     mkdirSync(path.join(dir, '.claude/agents'), { recursive: true })
