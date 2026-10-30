@@ -113,9 +113,14 @@ export function splitSections(text: string): {
   preamble: string
   sections: DiffSection[]
 } {
+  // Split on \n only (git does); never rely on JS `^`/`m` semantics, which also break on \r, U+2028/9.
   const starts: number[] = []
-  const re = /^diff --git /gm
-  for (let m = re.exec(text); m; m = re.exec(text)) starts.push(m.index)
+  for (let pos = 0; pos < text.length;) {
+    if (text.startsWith('diff --git ', pos)) starts.push(pos)
+    const nl = text.indexOf('\n', pos)
+    if (nl < 0) break
+    pos = nl + 1
+  }
   const preamble = text.slice(0, starts[0] ?? text.length)
   const sections = starts.map((s, i) => {
     const raw = text.slice(s, starts[i + 1] ?? text.length)
@@ -289,22 +294,47 @@ function parseSection(section: DiffSection): FileDiff {
   }
 }
 
+const LINE_TERMINATORS = /[\r\u2028\u2029]/
+
+function pseudo(malformed: string): FileDiff {
+  return {
+    oldPath: null,
+    newPath: null,
+    status: 'modified',
+    binary: false,
+    newMode: null,
+    oldMode: null,
+    headerMismatch: false,
+    malformed,
+    added: [],
+    removed: [],
+  }
+}
+
 export function parseUnifiedDiff(text: string): FileDiff[] {
   const { preamble, sections } = splitSections(text)
   const out = sections.map(parseSection)
+
+  // A path may appear in only one section, so a construct cannot be split across sections.
+  const seen = new Set<string>()
+  for (const d of out) {
+    const mine = new Set([d.oldPath, d.newPath])
+    for (const p of mine) {
+      if (p === null) continue
+      if (seen.has(p))
+        d.malformed ??= `path appears in more than one section: ${p}`
+    }
+    for (const p of mine) if (p !== null) seen.add(p)
+  }
+
   if (preamble.trim() !== '')
-    out.unshift({
-      oldPath: null,
-      newPath: null,
-      status: 'modified',
-      binary: false,
-      newMode: null,
-      oldMode: null,
-      headerMismatch: false,
-      malformed: `unparsed content before the first diff --git: ${JSON.stringify(preamble.trim().slice(0, 80))}`,
-      added: [],
-      removed: [],
-    })
+    out.unshift(
+      pseudo(
+        `unparsed content before the first diff --git: ${JSON.stringify(preamble.trim().slice(0, 80))}`,
+      ),
+    )
+  if (LINE_TERMINATORS.test(text))
+    out.unshift(pseudo('line terminator not allowed (CR, U+2028 or U+2029)'))
   return out
 }
 

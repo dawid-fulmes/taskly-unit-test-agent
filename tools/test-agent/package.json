@@ -15,7 +15,6 @@
   "dependencies": {
     "@octokit/rest": "22.0.1",
     "ajv": "8.20.0",
-    "parse-diff": "0.12.0",
     "picomatch": "4.0.7",
     "typescript": "5.9.3"
   },

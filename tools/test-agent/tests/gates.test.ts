@@ -238,13 +238,81 @@ describe('checkPatch hostile parser shapes', () => {
   })
 
   it('catches skip aliasing and cross-line modifiers', () => {
-    expect(rules(added('const s = it.skip'))).toEqual(['forbidden-call'])
+    expect(rules(added('const s = it.skip'))).toContain('forbidden-call')
     expect(rules(added("describe.skipIf(x)('a', () => {})"))).toEqual([
       'forbidden-call',
     ])
     expect(rules(added("it['only']('a', () => {})"))).toEqual([
       'forbidden-call',
     ])
+  })
+})
+
+describe('checkPatch round 2 bypasses', () => {
+  it.each(['r04-cr-split', 'r04-ls-split'])(
+    '%s is rejected for the line terminator',
+    (name) => {
+      const v = check(fixture(name)).violations
+      expect(v.map((x) => x.rule)).toContain('path')
+      expect(v.some((x) => x.detail.includes('line terminator'))).toBe(true)
+    },
+  )
+
+  it('rejects U+2029 and a bare CR anywhere', () => {
+    const base = fixture('clean-additive')
+    expect(rules(base.replace('works', 'wo rks'))).toContain('path')
+    expect(rules(base.replace('works', 'wo\rrks'))).toContain('path')
+  })
+
+  it('r01: the same path in two sections is rejected', () => {
+    const v = check(fixture('r01-dupsection')).violations
+    expect(
+      v.some(
+        (x) => x.rule === 'path' && x.detail.includes('more than one section'),
+      ),
+    ).toBe(true)
+  })
+
+  it('r02: destructuring/aliasing the runner is weakening', () => {
+    const v = check(fixture('r02-destructure')).violations
+    expect(v.length).toBeGreaterThan(0)
+    expect(v.every((x) => x.rule === 'weakening')).toBe(true)
+  })
+
+  const mod = (text: string) =>
+    `diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts\n--- a/backend/tests/a.test.ts\n+++ b/backend/tests/a.test.ts\n@@ -3,0 +4,${text.split('\n').length} @@\n${text
+      .split('\n')
+      .map((l) => '+' + l)
+      .join('\n')}\n`
+  it.each([
+    'beforeEach (() => {})',
+    'vi .mock("x")',
+    'vi\n  .mock("x")',
+    "vi['mock']('x')",
+    '  if (x) return',
+    'const f = () => { return 1 }',
+    'const x = 1; /* a',
+    'const x = 1 */',
+  ])('modified files reject normalised weakening %j', (text) => {
+    expect(rules(mod(text))).toEqual(['weakening'])
+  })
+
+  it.each([
+    'const { skip } = it',
+    'const t = it, u = t.only',
+    'const d = describe',
+    'x = expect',
+    'const m = vi',
+  ])('rejects aliasing %j', (text) => {
+    expect(rules(mod(text))).toContain('weakening')
+  })
+
+  it('still allows vi.fn()/spyOn()/expect.any() assignments', () => {
+    expect(rules(mod('const f = vi.fn()'))).toEqual([])
+    expect(rules(mod('const s = vi.spyOn(a, "b")'))).toEqual([])
+    expect(rules(mod('const m = expect.objectContaining({ a: 1 })'))).toEqual(
+      [],
+    )
   })
 })
 

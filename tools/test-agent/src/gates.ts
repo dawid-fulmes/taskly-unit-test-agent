@@ -66,8 +66,27 @@ const MODIFIED_ONLY: [RegExp, string][] = [
     'hook added to existing test file',
   ],
   [/\/\*|\*\//, 'block comment marker'],
-  [/^\s*return\s*;?\s*$/, 'bare return statement'],
+  [/\breturn\b/, 'return statement in existing test file'],
+  [/\bvi\s*\[/, 'bracket access on vi'],
 ]
+
+const ALIAS_RHS = new RegExp(
+  `=\\s*(?:it|test|describe|suite|bench|vi|expect)\\b(?!\\s*\\()(?!\\.(?:fn|spyOn)\\()(?!\\.(?:any|anything|objectContaining|arrayContaining|stringContaining|stringMatching)\\()`,
+)
+
+/** Reasons a chunk of added text weakens tests (may span lines). */
+function weakeningReasons(text: string, modified: boolean): string[] {
+  const n = normalise(text)
+  const out: string[] = []
+  if (SHADOW_DECL.test(n) || SHADOW_ASSIGN.test(n))
+    out.push('declares or reassigns a test global')
+  if (/\bexpect\.assertions\(\s*0\s*\)/.test(n))
+    out.push('expect.assertions(0)')
+  if (ALIAS_RHS.test(n)) out.push('aliases or destructures a test global')
+  if (modified)
+    for (const [re, why] of MODIFIED_ONLY) if (re.test(n)) out.push(why)
+  return out
+}
 
 export function checkPatch(
   diffs: FileDiff[],
@@ -180,21 +199,23 @@ export function checkPatch(
     }
 
     // Weakening: added lines that neutralise existing or new assertions.
+    let weak = false
     for (const l of d.added) {
-      const t = l.text
-      let why: string | null = null
-      if (SHADOW_DECL.test(t) || SHADOW_ASSIGN.test(t))
-        why = 'declares or reassigns a test global'
-      else if (/\bexpect\s*\.\s*assertions\s*\(\s*0\s*\)/.test(t))
-        why = 'expect.assertions(0)'
-      else if (d.status === 'modified')
-        why = MODIFIED_ONLY.find(([re]) => re.test(t))?.[1] ?? null
-      if (why)
+      const reasons = weakeningReasons(l.text, d.status === 'modified')
+      if (reasons.length > 0) {
+        weak = true
         add(
           'weakening',
-          `line ${l.line}: ${why} in ${JSON.stringify(t.trim())}`,
+          `line ${l.line}: ${reasons.join('; ')} in ${JSON.stringify(l.text.trim())}`,
         )
+      }
     }
+    if (!weak && d.added.length > 0)
+      for (const r of weakeningReasons(
+        d.added.map((l) => l.text).join('\n'),
+        d.status === 'modified',
+      ))
+        add('weakening', `across added lines: ${r}`)
 
     if (
       d.status === 'added' &&
