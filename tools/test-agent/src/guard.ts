@@ -71,24 +71,68 @@ function hasDotDot(value: string): boolean {
   return value.split(/[\\/]/).includes('..')
 }
 
-const SECRET_SAMPLES = ['.env', 'a/.env', '.env.local', 'a/.env.local']
+const SECRET_SAMPLES = [
+  '.env',
+  '.env.local',
+  '.env.production',
+  '.env.test',
+  '.env.development',
+  '.env.prod',
+  'backend/.env',
+  'backend/.env.production',
+  'frontend/.env.local',
+  'a/b/.env.test',
+]
 const GIT_SAMPLES = ['.git', '.git/config', '.git/HEAD', 'a/.git/config']
 
-/** Patterns must stay inside the work dir and must not be able to reach .git or secrets. */
-function patternProblem(pattern: string): string | null {
-  if (path.isAbsolute(pattern) || pattern.startsWith('~'))
-    return 'absolute pattern'
-  if (pattern.includes('..')) return 'pattern contains ..'
-  if (pattern.includes('.git')) return 'pattern references .git'
-  const candidates = pattern.includes('/')
-    ? [pattern]
-    : [pattern, `**/${pattern}`]
+/** Splits like Claude Code's Grep: on whitespace, then on commas outside braces. */
+function splitGlobs(value: string): string[] {
+  const pieces: string[] = []
+  for (const chunk of value.split(/\s+/)) {
+    let depth = 0
+    let current = ''
+    for (const ch of chunk) {
+      if (ch === '{') depth++
+      if (ch === '}') depth = Math.max(0, depth - 1)
+      if (ch === ',' && depth === 0) {
+        pieces.push(current)
+        current = ''
+      } else {
+        current += ch
+      }
+    }
+    pieces.push(current)
+  }
+  return pieces.filter((piece) => piece !== '')
+}
+
+function pieceProblem(policy: Policy, piece: string): string | null {
+  if (path.isAbsolute(piece) || piece.startsWith('~')) return 'absolute pattern'
+  if (piece.includes('..')) return 'pattern contains ..'
+  if (piece.includes('.git')) return 'pattern references .git'
+  if (piece.includes('.env') && piece !== '.env.example')
+    return 'pattern references .env'
+  const secrets = SECRET_SAMPLES.filter((sample) =>
+    isSecretPath(policy, sample),
+  )
+  const candidates = piece.includes('/') ? [piece] : [piece, `**/${piece}`]
   for (const candidate of candidates) {
-    for (const sample of [...GIT_SAMPLES, ...SECRET_SAMPLES]) {
+    for (const sample of [...GIT_SAMPLES, ...secrets]) {
       if (picomatch.isMatch(sample, candidate, { dot: true })) {
         return `pattern can match protected path ${sample}`
       }
     }
+  }
+  if (isSecretPath(policy, piece)) return 'pattern is a secret path'
+  return null
+}
+
+/** Patterns must stay inside the work dir and must not be able to reach .git or secrets. */
+function patternProblem(policy: Policy, pattern: string): string | null {
+  if (pattern.trim() === '') return 'empty pattern'
+  for (const piece of [pattern, ...splitGlobs(pattern)]) {
+    const problem = pieceProblem(policy, piece)
+    if (problem !== null) return problem
   }
   return null
 }
@@ -118,7 +162,7 @@ function decideRead(
   if (tool === 'Glob' && typeof pattern !== 'string')
     return deny('missing glob pattern')
   if (typeof pattern === 'string') {
-    const problem = patternProblem(pattern)
+    const problem = patternProblem(ctx.policy, pattern)
     if (problem !== null) return deny(problem)
   }
   const target = resolveTarget(ctx, rawPath)
