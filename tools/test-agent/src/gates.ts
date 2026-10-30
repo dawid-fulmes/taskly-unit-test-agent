@@ -16,6 +16,7 @@ export interface Violation {
     | 'rename'
     | 'mode'
     | 'weakening'
+    | 'integrity'
   detail: string
 }
 
@@ -216,8 +217,51 @@ function computedMembers(
   return out
 }
 
-function buildUnits(d: FileDiff): Unit[] {
-  const tsx = /\.tsx$/.test(d.newPath ?? '')
+/** A whole post-apply file, lexed once; units slice their code from it (R12). */
+interface FileContext {
+  /** Blanked code split on \n (same line layout as the file). */
+  codeLines: string[]
+  /** Offset of each line start in the file. */
+  lineStart: number[]
+  errors: Lexed['errors']
+  blockComments: number[]
+}
+
+function lexFile(text: string, tsx: boolean): FileContext {
+  const { code, errors, blockComments } = lex(text, tsx)
+  const lineStart = [0]
+  for (let i = 0; i < text.length; i++)
+    if (text[i] === '\n') lineStart.push(i + 1)
+  return { codeLines: code.split('\n'), lineStart, errors, blockComments }
+}
+
+const isTsx = (path: string | null) => /\.tsx$/.test(path ?? '')
+
+/** Lex one unit of added lines: alone, or (modified files after apply) sliced from the whole file. */
+function lexUnit(
+  lines: FileDiff['added'],
+  raw: string,
+  tsx: boolean,
+  ctx: FileContext | undefined,
+): Lexed {
+  if (!ctx) return lex(raw, tsx)
+  const first = lines[0]!.line
+  const base = ctx.lineStart[first - 1]!
+  const code = ctx.codeLines
+    .slice(first - 1, first - 1 + lines.length)
+    .join('\n')
+  return {
+    code,
+    // Whole-file parse errors are reported once by checkApplied.
+    errors: [],
+    blockComments: ctx.blockComments
+      .filter((o) => o >= base && o < base + code.length)
+      .map((o) => o - base),
+  }
+}
+
+function buildUnits(d: FileDiff, ctx?: FileContext): Unit[] {
+  const tsx = isTsx(d.newPath)
   const groups: FileDiff['added'][] = []
   for (const l of d.added) {
     const g = groups.at(-1)
@@ -227,7 +271,12 @@ function buildUnits(d: FileDiff): Unit[] {
   }
   return groups.map((lines) => {
     const raw = lines.map((l) => l.text).join('\n')
-    const { code, errors, blockComments } = lex(raw, tsx)
+    const { code, errors, blockComments } = lexUnit(
+      lines,
+      raw,
+      tsx,
+      d.status === 'modified' ? ctx : undefined,
+    )
     const weakening = errors.map((e) => ({
       offset: e.offset,
       why: `added code does not parse on its own (${e.message})`,
@@ -456,6 +505,86 @@ export function checkPatch(
   diffs: FileDiff[],
   policy: Policy,
 ): { ok: boolean; violations: Violation[] } {
+  return checkDiffs(diffs, policy, new Map())
+}
+
+/** A test or evidence file as it is on disk after `git apply`, with the lines the patch added. */
+export interface AppliedFile {
+  path: string
+  status: 'added' | 'modified'
+  text: string
+  added: { line: number; text: string }[]
+}
+
+/**
+ * R12: re-run the content gates on the files `git apply` produced. New files are gated whole
+ * from disk; modified files are lexed whole (so literals and comments are blanked in their real
+ * context) and the added-line rules run on the changed lines.
+ */
+export function checkApplied(
+  files: AppliedFile[],
+  policy: Policy,
+): { ok: boolean; violations: Violation[] } {
+  const violations: Violation[] = []
+  const diffs: FileDiff[] = []
+  const contexts = new Map<string, FileContext>()
+  for (const f of files) {
+    const add = (rule: Violation['rule'], detail: string) =>
+      violations.push({ file: f.path, rule, detail })
+    const lines = f.text.split('\n')
+    if (lines.at(-1) === '') lines.pop()
+    const differs = f.added.find((a) => lines[a.line - 1] !== a.text)
+    if (differs) {
+      add(
+        'integrity',
+        `applied content differs from the patch at line ${differs.line}`,
+      )
+      if (f.status === 'modified') continue
+    }
+    const base: FileDiff = {
+      oldPath: f.status === 'added' ? null : f.path,
+      newPath: f.path,
+      status: f.status,
+      binary: false,
+      newMode: null,
+      oldMode: null,
+      headerMismatch: false,
+      malformed: null,
+      added: f.added,
+      removed: [],
+    }
+    if (f.status === 'added') {
+      if (lines.length !== f.added.length)
+        add(
+          'integrity',
+          `applied file has ${lines.length} lines, the patch adds ${f.added.length}`,
+        )
+      diffs.push({
+        ...base,
+        added: lines.map((text, i) => ({ line: i + 1, text })),
+      })
+      continue
+    }
+    const ctx = lexFile(f.text, isTsx(f.path))
+    for (const e of ctx.errors) {
+      const line = ctx.lineStart.findLastIndex((s) => s <= e.offset) + 1
+      add(
+        'weakening',
+        `post-apply file does not parse at line ${line} (${e.message})`,
+      )
+    }
+    contexts.set(f.path, ctx)
+    diffs.push(base)
+  }
+  violations.push(...checkDiffs(diffs, policy, contexts).violations)
+  return { ok: violations.length === 0, violations }
+}
+
+function checkDiffs(
+  diffs: FileDiff[],
+  policy: Policy,
+  contexts: Map<string, FileContext>,
+): { ok: boolean; violations: Violation[] } {
   const violations: Violation[] = []
 
   for (const d of diffs) {
@@ -525,7 +654,10 @@ export function checkPatch(
         `${d.removed.length} line(s) removed from existing file (first at line ${d.removed[0]!.line})`,
       )
 
-    const units = buildUnits(d)
+    const units = buildUnits(
+      d,
+      d.newPath === null ? undefined : contexts.get(d.newPath),
+    )
     const modified = d.status === 'modified'
     const report = (
       rule: Violation['rule'],

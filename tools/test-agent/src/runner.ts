@@ -114,6 +114,8 @@ export function vitestCommand(opts: {
       '--coverage.enabled=true',
       '--coverage.reporter=json',
       `--coverage.reportsDirectory=/results/${opts.outputName}-coverage`,
+      // Head thresholds (e.g. per-file 100%) fail a passing single-file run; numbers are ours (ADR 0012).
+      '--coverage.thresholds=false',
     )
   }
   if (opts.shuffle) {

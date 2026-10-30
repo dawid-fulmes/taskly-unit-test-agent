@@ -188,6 +188,8 @@ describe('vitestCommand', () => {
     expect(cmd).toContain('--coverage.enabled=true')
     expect(cmd).toContain('--coverage.reporter=json')
     expect(cmd).toContain('--coverage.reportsDirectory=/results/after-coverage')
+    // Head thresholds would fail a passing single-file run; the verifier computes its own numbers.
+    expect(cmd).toContain('--coverage.thresholds=false')
   })
 
   it('adds shuffle flags', () => {

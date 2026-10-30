@@ -3,7 +3,12 @@ import { join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { changedLines, parseUnifiedDiff } from '../src/diff.ts'
-import { checkPatch, stripEvidence, testsRemoved } from '../src/gates.ts'
+import {
+  checkApplied,
+  checkPatch,
+  stripEvidence,
+  testsRemoved,
+} from '../src/gates.ts'
 import { loadPolicy } from '../src/policy.ts'
 
 const policy = loadPolicy()
@@ -700,6 +705,133 @@ describe('checkPatch: test-context result tampering', () => {
     "const resultState = 'x'",
   ])('new test files allow %j', (text) => {
     expect(check(added(text)).violations).toEqual([])
+  })
+})
+
+describe('checkApplied (R12: post-apply full-file context)', () => {
+  const existing = [
+    "import { expect, it } from 'vitest'",
+    "it('x', (t) => {",
+    '  const tpl = `a',
+    '  b`',
+    '  expect(tpl).toBeTruthy()',
+    '})',
+  ]
+  const insert = (at: number, added: string[]) => {
+    const lines = [...existing]
+    lines.splice(at - 1, 0, ...added)
+    return {
+      text: lines.join('\n') + '\n',
+      added: added.map((text, i) => ({ line: at + i, text })),
+    }
+  }
+  const modDiff = (at: number, added: string[]) =>
+    `diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts\n--- a/backend/tests/a.test.ts\n+++ b/backend/tests/a.test.ts\n@@ -${at - 1},0 +${at},${added.length} @@\n${added.map((l) => '+' + l).join('\n')}\n`
+
+  it('accepts a clean modification', () => {
+    const add = ['  expect(1).toBe(1)']
+    expect(check(modDiff(5, add)).ok).toBe(true)
+    const { text, added } = insert(5, add)
+    expect(
+      checkApplied(
+        [{ path: 'backend/tests/a.test.ts', status: 'modified', text, added }],
+        policy,
+      ),
+    ).toEqual({ ok: true, violations: [] })
+  })
+
+  it('sees code that per-block lexing takes for a string (inside an existing template)', () => {
+    const add = ["' ${(t.fails = true)} '"]
+    // The patch gate lexes the block alone: a plain string, nothing to flag.
+    expect(check(modDiff(4, add)).violations).toEqual([])
+    const { text, added } = insert(4, add)
+    const r = checkApplied(
+      [{ path: 'backend/tests/a.test.ts', status: 'modified', text, added }],
+      policy,
+    )
+    expect(r.ok).toBe(false)
+    expect(r.violations.map((v) => v.rule)).toEqual(['weakening'])
+    expect(r.violations[0]!.detail).toContain('test result member')
+  })
+
+  it('applies the modified-file rules to the changed lines', () => {
+    const { text, added } = insert(5, ['  beforeEach(() => {})'])
+    expect(
+      checkApplied(
+        [{ path: 'backend/tests/a.test.ts', status: 'modified', text, added }],
+        policy,
+      ).violations.map((v) => v.rule),
+    ).toEqual(['weakening'])
+  })
+
+  it('rejects a post-apply file that does not parse', () => {
+    const { text, added } = insert(5, ['  expect(1).toBe(1)'])
+    const broken = text.replace('})\n', '})) +\n')
+    const r = checkApplied(
+      [
+        {
+          path: 'backend/tests/a.test.ts',
+          status: 'modified',
+          text: broken,
+          added,
+        },
+      ],
+      policy,
+    )
+    expect(r.violations.map((v) => v.rule)).toContain('weakening')
+    expect(r.violations.map((v) => v.detail).join()).toContain('does not parse')
+  })
+
+  it('rejects applied content that differs from the patch', () => {
+    const { text, added } = insert(5, ['  expect(1).toBe(1)'])
+    const r = checkApplied(
+      [
+        {
+          path: 'backend/tests/a.test.ts',
+          status: 'modified',
+          text,
+          added: [{ line: 5, text: '  expect(2).toBe(2)' }],
+        },
+      ],
+      policy,
+    )
+    expect(r.violations).toEqual([
+      {
+        file: 'backend/tests/a.test.ts',
+        rule: 'integrity',
+        detail: 'applied content differs from the patch at line 5',
+      },
+    ])
+    void added
+  })
+
+  it('gates new files as whole files from disk', () => {
+    const text =
+      "import { expect, it } from 'vitest'\nit('x', () => { expect(1).toBe(1) })\n"
+    const added = text
+      .split('\n')
+      .slice(0, 2)
+      .map((t, i) => ({ line: i + 1, text: t }))
+    expect(
+      checkApplied(
+        [{ path: 'backend/tests/n.test.ts', status: 'added', text, added }],
+        policy,
+      ),
+    ).toEqual({ ok: true, violations: [] })
+    const extra = text + "it.skip('y', () => {})\n"
+    expect(
+      checkApplied(
+        [
+          {
+            path: 'backend/tests/n.test.ts',
+            status: 'added',
+            text: extra,
+            added,
+          },
+        ],
+        policy,
+      ).violations.map((v) => v.rule),
+    ).toEqual(['integrity', 'forbidden-call'])
   })
 })
 
