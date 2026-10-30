@@ -1,0 +1,2 @@
+#!/bin/sh
+exec node "$TEST_AGENT_TRUSTED_DIR/tools/test-agent/src/cli/run-tests.ts" "$@"
