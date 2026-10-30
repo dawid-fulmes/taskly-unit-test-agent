@@ -183,7 +183,7 @@ describe('checkPatch hostile parser shapes', () => {
     expect(rules(`${head}@@ -0,0 +1 @@\n+expect(1)\n+extra\n`)).toEqual([
       'path',
     ])
-    expect(rules(`${head}@@ -0,0 +2 @@\n+expect(1)\n`)).toEqual(['path'])
+    expect(rules(`${head}@@ -0,0 +1,2 @@\n+expect(1)\n`)).toEqual(['path'])
     expect(
       rules(`${head}@@ -0,0 +1 @@\n+expect(1)\n\\ No newline at end of file\n`),
     ).toEqual([])
