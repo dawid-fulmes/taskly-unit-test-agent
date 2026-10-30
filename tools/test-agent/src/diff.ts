@@ -1,5 +1,3 @@
-import parseDiff from 'parse-diff'
-
 export interface FileDiff {
   oldPath: string | null
   newPath: string | null
@@ -11,6 +9,8 @@ export interface FileDiff {
   oldMode: string | null
   /** True when the `diff --git` line disagrees with the ---/+++ or rename headers. */
   headerMismatch: boolean
+  /** Set when the section is not strictly well-formed git diff text (git apply could read more than we do). */
+  malformed: string | null
   added: { line: number; text: string }[]
   removed: { line: number; text: string }[]
 }
@@ -68,40 +68,45 @@ function readName(raw: string): string | null {
   return raw.replace(/\t$/, '')
 }
 
-function stripPrefix(name: string, prefix: 'a/' | 'b/'): string {
-  return name.startsWith(prefix) ? name.slice(2) : name
+/** Strip the mandatory `a/` / `b/` prefix; null when missing (git apply -p1 would eat a real component). */
+function stripPrefix(name: string, prefix: 'a/' | 'b/'): string | null {
+  return name.startsWith(prefix) ? name.slice(2) : null
 }
 
-/** Parse `diff --git <a> <b>`; null when ambiguous or malformed. */
+/** Parse `diff --git a/<x> b/<y>`; null when ambiguous, malformed or a/ b/ prefixes are missing. */
 function parseGitLine(line: string): { a: string; b: string } | null {
   const rest = line.slice('diff --git '.length)
+  let rawA: string | null
+  let rawB: string | null
   if (rest.startsWith('"')) {
-    // Quoted first name: find its closing quote.
     let i = 1
     while (i < rest.length && rest[i] !== '"') i += rest[i] === '\\' ? 2 : 1
-    const a = unquoteGit(rest.slice(0, i + 1))
-    const b = readName(rest.slice(i + 2))
-    if (a === null || b === null) return null
-    return { a: stripPrefix(a, 'a/'), b: stripPrefix(b, 'b/') }
-  }
-  if (rest.includes('"')) {
-    // Unquoted first, quoted second.
+    rawA = unquoteGit(rest.slice(0, i + 1))
+    if (rest[i + 1] !== ' ') return null
+    rawB = readName(rest.slice(i + 2))
+  } else if (rest.includes(' "')) {
     const idx = rest.indexOf(' "')
-    if (idx < 0) return null
-    const a = rest.slice(0, idx)
-    const b = unquoteGit(rest.slice(idx + 1))
-    if (b === null) return null
-    return { a: stripPrefix(a, 'a/'), b: stripPrefix(b, 'b/') }
-  }
-  // Both unquoted: for non-renames the halves are equal, which pins the split.
-  if (rest.startsWith('a/') && (rest.length - 5) % 2 === 0) {
+    rawA = rest.slice(0, idx)
+    rawB = unquoteGit(rest.slice(idx + 1))
+  } else if (rest.startsWith('a/') && (rest.length - 5) % 2 === 0) {
+    // Non-renames have equal halves, which pins the split.
     const half = (rest.length - 5) / 2
     const x = rest.slice(2, 2 + half)
     if (rest === `a/${x} b/${x}`) return { a: x, b: x }
+    const idx = rest.indexOf(' b/')
+    if (idx < 0) return null
+    rawA = rest.slice(0, idx)
+    rawB = rest.slice(idx + 1)
+  } else {
+    const idx = rest.indexOf(' b/')
+    if (idx < 0) return null
+    rawA = rest.slice(0, idx)
+    rawB = rest.slice(idx + 1)
   }
-  const idx = rest.indexOf(' b/')
-  if (idx < 0) return null
-  return { a: stripPrefix(rest.slice(0, idx), 'a/'), b: rest.slice(idx + 3) }
+  if (rawA === null || rawB === null) return null
+  const a = stripPrefix(rawA, 'a/')
+  const b = stripPrefix(rawB, 'b/')
+  return a === null || b === null ? null : { a, b }
 }
 
 export function splitSections(text: string): {
@@ -121,9 +126,60 @@ export function splitSections(text: string): {
   return { preamble, sections }
 }
 
+const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/
+const KNOWN_HEADER =
+  /^(index |similarity index |dissimilarity index |old mode |new mode |new file mode |deleted file mode |rename from |rename to |copy from |copy to |--- |\+\+\+ |Binary files )/
+
+/**
+ * Strict hunk parser driven by the @@ counts. After a hunk's counts are consumed only
+ * another hunk, a `\ No newline` marker, or the end of the section may follow.
+ */
+function parseHunks(
+  lines: string[],
+  added: FileDiff['added'],
+  removed: FileDiff['removed'],
+): string | null {
+  let i = 0
+  while (i < lines.length) {
+    const m = HUNK.exec(lines[i]!)
+    if (!m)
+      return `unexpected content after hunk: ${JSON.stringify(lines[i]!.slice(0, 80))}`
+    let oldLeft = m[2] === undefined ? 1 : Number(m[2])
+    let newLeft = m[4] === undefined ? 1 : Number(m[4])
+    let oldLn = Number(m[1])
+    let newLn = Number(m[3])
+    i++
+    while (oldLeft > 0 || newLeft > 0) {
+      const line = lines[i]
+      if (line === undefined) return 'hunk shorter than its @@ counts'
+      i++
+      const c = line[0]
+      if (c === '\\') continue
+      if (c === '+' && newLeft > 0) {
+        added.push({ line: newLn++, text: line.slice(1) })
+        newLeft--
+      } else if (c === '-' && oldLeft > 0) {
+        removed.push({ line: oldLn++, text: line.slice(1) })
+        oldLeft--
+      } else if ((c === ' ' || line === '') && oldLeft > 0 && newLeft > 0) {
+        oldLn++
+        newLn++
+        oldLeft--
+        newLeft--
+      } else
+        return `hunk line inconsistent with @@ counts: ${JSON.stringify(line.slice(0, 80))}`
+    }
+    while (lines[i]?.startsWith('\\')) i++
+  }
+  return null
+}
+
 function parseSection(section: DiffSection): FileDiff {
   const header = section.header
   const git = parseGitLine(header[0]!)
+  let malformed: string | null = git
+    ? null
+    : 'diff --git line is unparseable or lacks a/ b/ prefixes'
   let renameFrom: string | null = null
   let renameTo: string | null = null
   let copied = false
@@ -135,8 +191,26 @@ function parseSection(section: DiffSection): FileDiff {
   let newMode: string | null = null
   let binary = false
 
+  const bad = (why: string) => {
+    malformed ??= why
+  }
+  const side = (
+    raw: string,
+    prefix: 'a/' | 'b/',
+  ): string | null | undefined => {
+    const n = readName(raw)
+    if (n === '/dev/null') return null
+    const stripped = n === null ? null : stripPrefix(n, prefix)
+    if (stripped === null) {
+      bad(`---/+++ path lacks ${prefix} prefix or is malformed`)
+      return undefined
+    }
+    return stripped
+  }
+
   for (const line of header.slice(1)) {
     let m: RegExpMatchArray | null
+    if (binary) continue // binary bodies are rejected wholesale
     if ((m = line.match(/^new file mode (\S+)/))) newFileMode = m[1]!
     else if ((m = line.match(/^deleted file mode (\S+)/)))
       deletedFileMode = m[1]!
@@ -152,16 +226,18 @@ function parseSection(section: DiffSection): FileDiff {
       copied = true
       renameTo = readName(line.slice(8))
     } else if (line.startsWith('--- ')) {
-      const n = readName(line.slice(4))
-      minus = n === '/dev/null' ? null : n === null ? n : stripPrefix(n, 'a/')
+      if (minus !== undefined) bad('duplicate --- header')
+      minus = side(line.slice(4), 'a/')
     } else if (line.startsWith('+++ ')) {
-      const n = readName(line.slice(4))
-      plus = n === '/dev/null' ? null : n === null ? n : stripPrefix(n, 'b/')
+      if (plus !== undefined) bad('duplicate +++ header')
+      plus = side(line.slice(4), 'b/')
     } else if (
       /^Binary files .* differ$/.test(line) ||
       line === 'GIT binary patch'
     )
       binary = true
+    else if (line !== '' && !KNOWN_HEADER.test(line))
+      bad(`unrecognised header line: ${JSON.stringify(line.slice(0, 80))}`)
   }
 
   let oldPath: string | null
@@ -193,19 +269,10 @@ function parseSection(section: DiffSection): FileDiff {
   const added: FileDiff['added'] = []
   const removed: FileDiff['removed'] = []
   if (!binary) {
-    // Feed parse-diff only the hunks; it needs ---/+++ to open a file block.
-    const hunkText = section.raw.slice(section.raw.indexOf('\n@@') + 1)
-    if (section.raw.includes('\n@@')) {
-      const parsed = parseDiff(`--- a/x\n+++ b/x\n${hunkText}`)
-      for (const f of parsed)
-        for (const chunk of f.chunks)
-          for (const c of chunk.changes) {
-            if (c.type === 'add')
-              added.push({ line: c.ln, text: c.content.slice(1) })
-            else if (c.type === 'del')
-              removed.push({ line: c.ln, text: c.content.slice(1) })
-          }
-    }
+    const lines = section.raw.split('\n')
+    if (lines[lines.length - 1] === '') lines.pop()
+    const err = parseHunks(lines.slice(header.length), added, removed)
+    if (err) bad(err)
   }
 
   return {
@@ -216,13 +283,29 @@ function parseSection(section: DiffSection): FileDiff {
     newMode: newFileMode ?? newMode,
     oldMode: deletedFileMode ?? oldMode,
     headerMismatch,
+    malformed,
     added,
     removed,
   }
 }
 
 export function parseUnifiedDiff(text: string): FileDiff[] {
-  return splitSections(text).sections.map(parseSection)
+  const { preamble, sections } = splitSections(text)
+  const out = sections.map(parseSection)
+  if (preamble.trim() !== '')
+    out.unshift({
+      oldPath: null,
+      newPath: null,
+      status: 'modified',
+      binary: false,
+      newMode: null,
+      oldMode: null,
+      headerMismatch: false,
+      malformed: `unparsed content before the first diff --git: ${JSON.stringify(preamble.trim().slice(0, 80))}`,
+      added: [],
+      removed: [],
+    })
+  return out
 }
 
 /** New-file line numbers of added lines. */

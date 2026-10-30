@@ -1,0 +1,6 @@
+diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts
+--- a/backend/tests/a.test.ts
++++ b/backend/tests/a.test.ts
+@@ -4,0 +5,2 @@
++++ globalThis.n; it.skip('x', () => {})
++// end

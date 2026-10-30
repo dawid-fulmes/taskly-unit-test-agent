@@ -1,0 +1,14 @@
+diff --git a/backend/tests/n.test.ts b/backend/tests/n.test.ts
+new file mode 100644
+--- /dev/null
++++ b/backend/tests/n.test.ts
+@@ -0,0 +1,9 @@
++import { it, expect } from 'vitest'
++it['skip']('a', () => {})
++const s = it.skip
++s('b', () => { expect(1) })
++it.skip
++  ('c', () => {})
++it[`only`]('d', () => {})
++it('e', () => { expect(1).toMatchFileSnapshot('x') })
++it('f', () => { expect.assertions(0); return })

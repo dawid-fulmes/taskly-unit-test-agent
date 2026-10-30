@@ -14,6 +14,7 @@ export interface Violation {
     | 'symlink'
     | 'rename'
     | 'mode'
+    | 'weakening'
   detail: string
 }
 
@@ -31,10 +32,42 @@ function unsafePath(path: string): string | null {
   return null
 }
 
-/** Collapse whitespace around `.` and before `(` so `it . only (` matches `.only(`. */
-function normalise(line: string): string {
-  return line.replace(/\s*\.\s*/g, '.').replace(/\s+\(/g, '(')
+/** Collapse whitespace around `.` and before `(` (newlines included) so `it . only\n(` matches `.only(`. */
+function normalise(text: string): string {
+  return text.replace(/\s*\.\s*/g, '.').replace(/\s+\(/g, '(')
 }
+
+const RUNNERS = '(?:it|test|describe|suite|bench)'
+const BRACKET_ACCESS = new RegExp(`\\b${RUNNERS}\\s*\\[`)
+const SKIP_ALIAS =
+  /\b(?:it|test|describe|suite)(?:\.\w+)*\.(?:skip|only|todo|fails|skipIf|runIf)\b/
+
+/** Reasons a chunk of added text declares skipped/focused tests (may span lines). */
+function forbiddenCallReasons(text: string, calls: string[]): string[] {
+  const n = normalise(text)
+  const out: string[] = []
+  const call = calls.find((c) => n.includes(c))
+  if (call) out.push(call)
+  if (BRACKET_ACCESS.test(n)) out.push('bracket access on test function')
+  if (SKIP_ALIAS.test(n)) out.push('skip/only/todo/fails modifier')
+  return out
+}
+
+const GLOBALS =
+  'expect|it|test|describe|vi|beforeEach|afterEach|beforeAll|afterAll'
+const SHADOW_DECL = new RegExp(
+  `\\b(?:const|let|var|function|class)\\s+(?:${GLOBALS})\\b`,
+)
+const SHADOW_ASSIGN = /\b(?:expect|it|test|describe|vi)\s*=(?![=>])/
+const MODIFIED_ONLY: [RegExp, string][] = [
+  [/\bvi\.(?:mock|doMock|unmock|stubGlobal|stubEnv)\(/, 'vi mocking/stubbing'],
+  [
+    /\b(?:beforeEach|beforeAll|afterEach|afterAll)\(/,
+    'hook added to existing test file',
+  ],
+  [/\/\*|\*\//, 'block comment marker'],
+  [/^\s*return\s*;?\s*$/, 'bare return statement'],
+]
 
 export function checkPatch(
   diffs: FileDiff[],
@@ -47,12 +80,15 @@ export function checkPatch(
     const add = (rule: Violation['rule'], detail: string) =>
       violations.push({ file, rule, detail })
 
+    if (d.malformed)
+      add('path', `unparsed or malformed diff content: ${d.malformed}`)
+
     // Path gate: every named path must be safe and an allowed test/evidence file.
     let pathsOk = true
     const named = [...new Set([d.oldPath, d.newPath])].filter(
       (p): p is string => p !== null,
     )
-    if (named.length === 0) {
+    if (named.length === 0 && !d.malformed) {
       add('path', 'diff section has no usable path')
       pathsOk = false
     }
@@ -106,19 +142,57 @@ export function checkPatch(
         `${d.removed.length} line(s) removed from existing file (first at line ${d.removed[0]!.line})`,
       )
 
+    let flagged = false
     for (const l of d.added) {
-      const n = normalise(l.text)
-      const call = policy.forbiddenTestCalls.find((c) => n.includes(c))
-      if (call)
+      const reasons = forbiddenCallReasons(l.text, policy.forbiddenTestCalls)
+      if (reasons.length > 0) {
+        flagged = true
         add(
           'forbidden-call',
-          `line ${l.line}: ${call} in ${JSON.stringify(l.text.trim())}`,
+          `line ${l.line}: ${reasons.join('; ')} in ${JSON.stringify(l.text.trim())}`,
         )
-      const snap = policy.forbiddenAssertions.find((c) => n.includes(c))
-      if (snap)
+      }
+    }
+    if (!flagged && d.added.length > 0) {
+      // Constructs split across lines (`it.skip\n('x')`).
+      const joined = d.added.map((l) => l.text).join('\n')
+      for (const r of forbiddenCallReasons(joined, policy.forbiddenTestCalls))
+        add('forbidden-call', `across added lines: ${r}`)
+    }
+
+    let snapFlagged = false
+    for (const l of d.added) {
+      const snap = policy.forbiddenAssertions.find((c) =>
+        normalise(l.text).includes(c),
+      )
+      if (snap) {
+        snapFlagged = true
         add(
           'snapshot',
           `line ${l.line}: ${snap} in ${JSON.stringify(l.text.trim())}`,
+        )
+      }
+    }
+    if (!snapFlagged) {
+      const n = normalise(d.added.map((l) => l.text).join('\n'))
+      const snap = policy.forbiddenAssertions.find((c) => n.includes(c))
+      if (snap) add('snapshot', `across added lines: ${snap}`)
+    }
+
+    // Weakening: added lines that neutralise existing or new assertions.
+    for (const l of d.added) {
+      const t = l.text
+      let why: string | null = null
+      if (SHADOW_DECL.test(t) || SHADOW_ASSIGN.test(t))
+        why = 'declares or reassigns a test global'
+      else if (/\bexpect\s*\.\s*assertions\s*\(\s*0\s*\)/.test(t))
+        why = 'expect.assertions(0)'
+      else if (d.status === 'modified')
+        why = MODIFIED_ONLY.find(([re]) => re.test(t))?.[1] ?? null
+      if (why)
+        add(
+          'weakening',
+          `line ${l.line}: ${why} in ${JSON.stringify(t.trim())}`,
         )
     }
 
@@ -137,7 +211,9 @@ export function checkPatch(
 /** Remove evidence file sections from raw diff text; everything else stays byte-identical. */
 export function stripEvidence(diffText: string, policy: Policy): string {
   const { preamble, sections } = splitSections(diffText)
-  const parsed = parseUnifiedDiff(diffText)
+  // parseUnifiedDiff prepends a pseudo entry for preamble text; align to sections.
+  const all = parseUnifiedDiff(diffText)
+  const parsed = all.slice(all.length - sections.length)
   const kept = sections.filter((_, i) => {
     const d = parsed[i]!
     return ![d.oldPath, d.newPath].some(

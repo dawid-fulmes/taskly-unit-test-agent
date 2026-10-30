@@ -35,5 +35,11 @@
     ".skipIf(",
     ".runIf("
   ],
-  "forbiddenAssertions": ["toMatchSnapshot(", "toMatchInlineSnapshot("]
+  "forbiddenAssertions": [
+    "toMatchSnapshot(",
+    "toMatchInlineSnapshot(",
+    "toMatchFileSnapshot(",
+    "toThrowErrorMatchingSnapshot(",
+    "toThrowErrorMatchingInlineSnapshot("
+  ]
 }

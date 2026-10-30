@@ -142,6 +142,112 @@ describe('checkPatch', () => {
   })
 })
 
+describe('checkPatch hostile parser shapes', () => {
+  it.each(['probe-p1', 'probe-p2', 'probe-p3', 'probe-p8'])(
+    '%s -> path only',
+    (name) => {
+      const r = check(fixture(name))
+      expect(r.ok).toBe(false)
+      expect(r.violations.map((v) => v.rule)).toEqual(['path'])
+    },
+  )
+
+  it('p5: a +++-looking added line is content, not a header', () => {
+    const diffs = parseUnifiedDiff(fixture('probe-p5'))
+    expect(diffs).toHaveLength(1)
+    expect(diffs[0]!.added.map((l) => l.text)).toEqual([
+      "++ globalThis.n; it.skip('x', () => {})",
+      '// end',
+    ])
+    expect(rules(fixture('probe-p5'))).toEqual(['forbidden-call'])
+  })
+
+  it('p7: skip evasions, snapshot variants and assertions(0) are all caught', () => {
+    const v = check(fixture('probe-p7')).violations
+    expect(v.filter((x) => x.rule === 'forbidden-call')).toHaveLength(4)
+    expect(v.map((x) => x.rule)).toContain('snapshot')
+    expect(v.map((x) => x.rule)).toContain('weakening')
+  })
+
+  it('p9: shadowing expect inside an existing test is weakening', () => {
+    expect(rules(fixture('probe-p9'))).toEqual(['weakening'])
+  })
+
+  it('whitespace-only text is ok, other text without sections is not', () => {
+    expect(check('\n  \n').ok).toBe(true)
+    expect(rules('just some text\n')).toEqual(['path'])
+  })
+
+  it('rejects text after a hunk and hunks shorter than their counts', () => {
+    const head = `diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts\nnew file mode 100644\n--- /dev/null\n+++ b/backend/tests/a.test.ts\n`
+    expect(rules(`${head}@@ -0,0 +1 @@\n+expect(1)\n+extra\n`)).toEqual([
+      'path',
+    ])
+    expect(rules(`${head}@@ -0,0 +2 @@\n+expect(1)\n`)).toEqual(['path'])
+    expect(
+      rules(`${head}@@ -0,0 +1 @@\n+expect(1)\n\\ No newline at end of file\n`),
+    ).toEqual([])
+  })
+
+  it('requires a/ and b/ prefixes on ---/+++ too', () => {
+    const t = `diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts\nnew file mode 100644\n--- /dev/null\n+++ backend/tests/a.test.ts\n@@ -0,0 +1 @@\n+expect(1)\n`
+    expect(rules(t)).toContain('path')
+  })
+
+  const mod = (line: string) =>
+    `diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts\n--- a/backend/tests/a.test.ts\n+++ b/backend/tests/a.test.ts\n@@ -3,0 +4 @@\n+${line}\n`
+  const added = (line: string) =>
+    `diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts\nnew file mode 100644\n--- /dev/null\n+++ b/backend/tests/a.test.ts\n@@ -0,0 +1,2 @@\n+expect(1)\n+${line}\n`
+
+  it.each([
+    'vi.mock("x")',
+    'vi.stubEnv("A", "b")',
+    'beforeEach(() => {})',
+    '/* hide',
+    '  return',
+    '  return;',
+  ])('modified files reject %j', (line) => {
+    expect(rules(mod(line))).toEqual(['weakening'])
+  })
+
+  it.each([
+    'vi.mock("x")',
+    'beforeEach(() => {})',
+    '/** doc */',
+    'const x = 1',
+    'return value',
+  ])('new files allow %j', (line) => {
+    expect(rules(added(line))).toEqual([])
+  })
+
+  it.each([
+    'let it = () => {}',
+    'function expect() {}',
+    'expect = noop',
+    'vi = other',
+    'expect.assertions(0)',
+    'const vi = 1',
+  ])('all test files reject %j', (line) => {
+    expect(rules(added(line))).toEqual(['weakening'])
+  })
+
+  it('does not flag comparisons or arrow params', () => {
+    expect(rules(added('if (a === b) {}'))).toEqual([])
+    expect(rules(added('const f = (it) => it'))).toEqual([])
+    expect(rules(added('xs.map(test => test)'))).toEqual([])
+  })
+
+  it('catches skip aliasing and cross-line modifiers', () => {
+    expect(rules(added('const s = it.skip'))).toEqual(['forbidden-call'])
+    expect(rules(added("describe.skipIf(x)('a', () => {})"))).toEqual([
+      'forbidden-call',
+    ])
+    expect(rules(added("it['only']('a', () => {})"))).toEqual([
+      'forbidden-call',
+    ])
+  })
+})
+
 describe('stripEvidence', () => {
   it('drops evidence sections and keeps the rest byte-identical', () => {
     const text = fixture('evidence-mixed')

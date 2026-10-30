@@ -41,5 +41,11 @@ describe('policy', () => {
     expect(p.skipMinChangedLineCoverage).toBe(0.8)
     expect(p.forbiddenTestCalls).toContain('.skip(')
     expect(p.forbiddenAssertions).toContain('toMatchSnapshot(')
+    for (const a of [
+      'toMatchFileSnapshot(',
+      'toThrowErrorMatchingSnapshot(',
+      'toThrowErrorMatchingInlineSnapshot(',
+    ])
+      expect(p.forbiddenAssertions).toContain(a)
   })
 })

@@ -1,0 +1,5 @@
+diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts
+--- a/backend/tests/a.test.ts
++++ b/backend/tests/a.test.ts
+@@ -2,0 +3 @@
++  const expect = (..._a: unknown[]) => ({ toBe() {} })
