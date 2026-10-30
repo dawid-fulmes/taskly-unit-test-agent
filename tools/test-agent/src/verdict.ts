@@ -219,6 +219,21 @@ function preVerification(i: VerdictInputs): Stage | null {
     return { outcome: 'patch-rejected', reasons: rejected }
   if (i.after === null)
     return { outcome: 'pipeline-error', reasons: ['after results missing'] }
+  // The evidence-stripped patch is non-empty exactly when it touches a test file (gates allow nothing else).
+  if (!i.patchEmpty && i.patchTestFiles.length === 0)
+    return {
+      outcome: 'pipeline-error',
+      reasons: [
+        'inconsistent verify inputs: non-empty patch without patch test files',
+      ],
+    }
+  if (i.patchEmpty && i.patchTestFiles.length > 0)
+    return {
+      outcome: 'pipeline-error',
+      reasons: [
+        'inconsistent verify inputs: empty patch with patch test files',
+      ],
+    }
   return null
 }
 

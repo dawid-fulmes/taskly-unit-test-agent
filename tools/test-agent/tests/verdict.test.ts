@@ -1013,6 +1013,28 @@ const cases: Case[] = [
     commitAllowed: false,
     reason: /a\.test\.ts: no passed test in stability runs/,
   },
+  {
+    name: 'non-empty patch without patch test files: pipeline-error',
+    mutate: (i) => {
+      i.patchTestFiles = []
+    },
+    outcome: 'pipeline-error',
+    conclusion: 'neutral',
+    commitAllowed: false,
+    reason:
+      /inconsistent verify inputs: non-empty patch without patch test files/,
+  },
+  {
+    name: 'empty patch with patch test files: pipeline-error',
+    mutate: (i) => {
+      alreadyCovered(i)
+      i.patchTestFiles = [{ path: A, status: 'added' }]
+    },
+    outcome: 'pipeline-error',
+    conclusion: 'neutral',
+    commitAllowed: false,
+    reason: /inconsistent verify inputs: empty patch with patch test files/,
+  },
 ]
 
 describe('computeVerdict', () => {
