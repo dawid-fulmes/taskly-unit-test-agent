@@ -330,6 +330,8 @@ const MODIFIED_RAW: [RegExp, string][] = [
   ],
   [VI_MOCKING, 'vi mocking/stubbing'],
   [HOOKS, 'hook in existing test file'],
+  // Inside an existing block comment, a quoted `*/ code /*` would close it and run the code.
+  [/\/\*|\*\//, 'block comment marker'],
 ]
 
 /** Test globals used as values (passed, aliased, cast, compared, ...). Object keys are exempt. */

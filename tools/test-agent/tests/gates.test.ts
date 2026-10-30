@@ -509,6 +509,24 @@ describe('checkPatch round 5: blanked literals and assertion overrides', () => {
     expect(rules(fixture('t01_chai_mod'))).toEqual(['weakening', 'weakening'])
   })
 
+  it('t02: a block comment marker hidden in a string of an existing test file is rejected', () => {
+    // Inserted inside an existing block comment, `*/` would close it and run the code.
+    const v = check(fixture('t02_mod_block_comment_string')).violations
+    expect(v.map((x) => x.rule)).toEqual(['weakening'])
+    expect(v[0]!.detail).toContain('block comment marker')
+  })
+
+  it.each(["const g = 'src/**/*.ts'", '// see /* above', "const s = '*/'"])(
+    'modified files reject the raw block comment marker in %j',
+    (line) => {
+      expect(rules(mod(line))).toContain('weakening')
+    },
+  )
+
+  it('new files may contain block comment markers in strings', () => {
+    expect(check(added("const g = 'src/**/*.ts'")).violations).toEqual([])
+  })
+
   it.each([
     "(expect as any).extend({ toBe: () => ({ pass: true, message: () => '' }) })",
     "(expect!).extend({ toBe: () => ({ pass: true, message: () => '' }) })",
