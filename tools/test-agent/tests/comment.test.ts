@@ -218,6 +218,34 @@ describe('autolinks, invisibles and fences', () => {
   })
 })
 
+describe('summary autolinks', () => {
+  it('breaks issue refs in defect summaries', () => {
+    const out = renderComment(
+      verdict({
+        outcome: 'defect',
+        conclusion: 'failure',
+        defects: [
+          {
+            file: 'x #123 org/repo#45 https://e.example',
+            evidenceTest: 'backend/tests/__evidence__/a.test.ts',
+            citation: 'c',
+            accepted: true,
+          },
+        ],
+      }),
+      report(),
+      meta(),
+    )
+    const summary = out
+      .split('\n')
+      .find((l) => l.includes('Suspected defect:'))!
+    expect(summary).not.toMatch(/#\d/)
+    expect(summary).not.toContain('://')
+    expect(summary).toContain(`#${ZWJ}123`)
+    expect(summary).toContain(`org/repo#${ZWJ}45`)
+  })
+})
+
 describe('verdict lines', () => {
   const outcomes: Outcome[] = [
     'tests-added',

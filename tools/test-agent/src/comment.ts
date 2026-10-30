@@ -103,7 +103,7 @@ export function escapeModelText(s: string): string {
 
 /** HTML-only variant for text inside `<summary>`, where Markdown is not parsed. */
 function summaryText(s: string): string {
-  return htmlSafe(stripInvisible(s)).replace(/\s+/g, ' ')
+  return htmlSafe(breakAutolinks(stripInvisible(s))).replace(/\s+/g, ' ')
 }
 
 function fence(content: string, lang = 'text'): string {
