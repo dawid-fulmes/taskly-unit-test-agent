@@ -1,0 +1,372 @@
+name: test-agent-pipeline
+
+# plan -> generate -> verify -> publish (spec §6, ADR 0016, ADR 0019). Called from test-agent-pr.yml
+# (workflow_run, from main) and test-agent-backfill.yml (workflow_dispatch on main).
+#
+# Trust layout in every job: `trusted/` is the base checkout (agent, skills, settings, tooling),
+# `work/` is the analysed tree. Code from `work/` only ever runs inside the pinned runner
+# container with no network and no environment. The model key exists only in the agent step;
+# the App token exists only in publish.
+on:
+  workflow_call:
+    inputs:
+      mode:
+        type: string
+        required: true
+      pr_number:
+        type: string
+        default: ''
+      head_sha:
+        type: string
+        default: ''
+      budget_profile:
+        type: string
+        default: default
+      app:
+        type: string
+        default: ''
+      max_files:
+        type: number
+        default: 8
+      base_ref:
+        type: string
+        default: ''
+
+permissions: {}
+
+env:
+  TEST_AGENT_IMAGE: ${{ vars.TEST_AGENT_IMAGE }}
+  # The analysed commit: the PR head (confirmed by the filter) or the default branch for backfill.
+  ANALYSED_SHA: ${{ inputs.mode == 'pr' && inputs.head_sha || github.sha }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+    concurrency:
+      group: test-agent-${{ inputs.mode }}-${{ inputs.pr_number || inputs.app }}
+      cancel-in-progress: true
+    outputs:
+      early: ${{ steps.plan.outputs.early }}
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443 api.github.com:443 codeload.github.com:443
+            objects.githubusercontent.com:443 *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443 registry.npmjs.org:443 nodejs.org:443
+            registry-1.docker.io:443 auth.docker.io:443 production.cloudflare.docker.com:443
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: work
+          ref: ${{ env.ANALYSED_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./trusted/.github/actions/prepare
+        with:
+          trusted: trusted
+          work: ${{ inputs.mode == 'backfill' && 'work' || '' }}
+          image: ${{ inputs.mode == 'backfill' && env.TEST_AGENT_IMAGE || '' }}
+      - name: Read the pull request
+        if: inputs.mode == 'pr'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pull.json"
+          jq '{number, title, body: (.body // ""), draft, labels: [.labels[].name]}' \
+            "$RUNNER_TEMP/pull.json" > "$RUNNER_TEMP/pr.json"
+          echo "BASE_SHA=$(jq -r .base.sha "$RUNNER_TEMP/pull.json")" >> "$GITHUB_ENV"
+      - name: Measure base coverage (backfill)
+        if: inputs.mode == 'backfill'
+        env:
+          APP: ${{ inputs.app }}
+        run: |
+          user="$(id -u):$(id -g)"
+          if [ "$APP" = backend ]; then
+            docker run --rm --user "$user" -e HOME=/tmp \
+              -v "$PWD/work/backend:/app" -w /app "$TEST_AGENT_IMAGE" npx prisma generate
+          fi
+          mkdir -p "$RUNNER_TEMP/cov"
+          docker run --rm --network none --user "$user" --env-file /dev/null \
+            -e HOME=/tmp -e CI=1 --memory 4g --cpus 2 --pids-limit 512 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            -v "$PWD/work/$APP:/app" -v "$RUNNER_TEMP/cov:/results" -w /app "$TEST_AGENT_IMAGE" \
+            npx vitest run --coverage.enabled=true --coverage.reporter=json \
+              --coverage.reportsDirectory=/results --coverage.thresholds=false
+      - id: plan
+        env:
+          MODE: ${{ inputs.mode }}
+          APP: ${{ inputs.app }}
+          MAX_FILES: ${{ inputs.max_files }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          if [ "$MODE" = pr ]; then
+            node trusted/tools/test-agent/src/cli/plan.ts --mode pr \
+              --base "$BASE_SHA" --head "$ANALYSED_SHA" --pr-json "$RUNNER_TEMP/pr.json" \
+              --trusted trusted --work work --out "$RUNNER_TEMP/out/plan.json"
+          else
+            node trusted/tools/test-agent/src/cli/plan.ts --mode backfill \
+              --app "$APP" --max-files "$MAX_FILES" --coverage "$RUNNER_TEMP/cov/coverage-final.json" \
+              --trusted trusted --base "$ANALYSED_SHA" --out "$RUNNER_TEMP/out/plan.json"
+          fi
+          echo "early=$(jq -r '.earlyOutcome // ""' "$RUNNER_TEMP/out/plan.json")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plan
+          path: ${{ runner.temp }}/out/plan.json
+          retention-days: 7
+
+  generate:
+    needs: plan
+    if: needs.plan.outputs.early == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: ${{ inputs.mode == 'backfill' && 'test-agent-backfill' || 'test-agent-pr' }}
+    permissions:
+      contents: read
+    concurrency:
+      group: test-agent-${{ inputs.mode }}-${{ inputs.pr_number || inputs.app }}
+      cancel-in-progress: true
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443 api.github.com:443 codeload.github.com:443
+            objects.githubusercontent.com:443 *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443 registry.npmjs.org:443 nodejs.org:443
+            registry-1.docker.io:443 auth.docker.io:443 production.cloudflare.docker.com:443
+            api.anthropic.com:443
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: work
+          ref: ${{ env.ANALYSED_SHA }}
+          persist-credentials: false
+      - uses: ./trusted/.github/actions/prepare
+        with:
+          trusted: trusted
+          work: work
+          image: ${{ env.TEST_AGENT_IMAGE }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plan
+          path: ${{ runner.temp }}/run
+      - name: Generate the Prisma client in a container (ADR 0009)
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" --env-file /dev/null -e HOME=/tmp \
+            -v "$PWD/work/backend:/app" -w /app "$TEST_AGENT_IMAGE" npx prisma generate
+      - name: Install Claude Code
+        run: npm install --global --no-audit --no-fund @anthropic-ai/claude-code@2.1.287
+      - name: Replace PR-supplied agent configuration with the trusted copy
+        run: node trusted/tools/test-agent/src/cli/prepare-workspace.ts --trusted trusted --work work
+      - id: budget
+        env:
+          PROFILE: ${{ inputs.budget_profile }}
+        run: |
+          case "$PROFILE" in
+            large)    echo "usd=6"  >> "$GITHUB_OUTPUT"; echo "turns=120" >> "$GITHUB_OUTPUT"; echo "minutes=40" >> "$GITHUB_OUTPUT" ;;
+            backfill) echo "usd=10" >> "$GITHUB_OUTPUT"; echo "turns=150" >> "$GITHUB_OUTPUT"; echo "minutes=45" >> "$GITHUB_OUTPUT" ;;
+            *)        echo "usd=3"  >> "$GITHUB_OUTPUT"; echo "turns=60"  >> "$GITHUB_OUTPUT"; echo "minutes=20" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - id: agent
+        name: Run the unit test agent
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(steps.budget.outputs.minutes) }}
+        working-directory: work
+        env:
+          # The only step that holds the model key. Tests the agent runs never see it: the runner
+          # starts them in a container with an empty environment and no network (ADR 0010).
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TEST_AGENT_TRUSTED_DIR: ${{ github.workspace }}/trusted
+          TEST_AGENT_WORK_DIR: ${{ github.workspace }}/work
+          TEST_AGENT_RUN_DIR: ${{ runner.temp }}/run
+          TEST_AGENT_GUARD_LOG: ${{ runner.temp }}/run/guard.jsonl
+          MODEL: ${{ vars.TEST_AGENT_MODEL || 'claude-sonnet-5-5' }}
+          MAX_USD: ${{ steps.budget.outputs.usd }}
+          MAX_TURNS: ${{ steps.budget.outputs.turns }}
+          DISABLE_TELEMETRY: '1'
+          DISABLE_ERROR_REPORTING: '1'
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+        run: |
+          claude -p "Process the test-agent plan. RUN_DIR is $TEST_AGENT_RUN_DIR (read RUN_DIR/plan.json first, write RUN_DIR/report.json last). The repository root is the current directory." \
+            --agent unit-test-agent --model "$MODEL" \
+            --settings "$TEST_AGENT_TRUSTED_DIR/.claude/test-agent.settings.json" --setting-sources project \
+            --strict-mcp-config --permission-mode dontAsk \
+            --max-budget-usd "$MAX_USD" --max-turns "$MAX_TURNS" \
+            --output-format stream-json --verbose --include-hook-events \
+            > "$TEST_AGENT_RUN_DIR/transcript.jsonl"
+      - name: Record how the agent stopped
+        if: always()
+        env:
+          AGENT_OUTCOME: ${{ steps.agent.outcome }}
+          RUN: ${{ runner.temp }}/run
+        run: |
+          node --input-type=module -e '
+            import { existsSync, readFileSync, writeFileSync } from "node:fs"
+            import { summarizeTranscript } from "./trusted/tools/test-agent/src/transcript.ts"
+            const file = process.env.RUN + "/transcript.jsonl"
+            const t = existsSync(file) ? readFileSync(file, "utf8") : ""
+            const hasResult = t.split("\n").some((l) => l.includes("\"type\":\"result\""))
+            const stop = hasResult ? summarizeTranscript(t).stop : process.env.AGENT_OUTCOME === "success" ? "unknown" : "timeout"
+            writeFileSync(process.env.RUN + "/agent-stop.txt", stop + "\n")
+            console.log("agent stop: " + stop)
+          '
+      - name: Capture the patch
+        if: always()
+        run: >
+          node trusted/tools/test-agent/src/cli/make-patch.ts
+          --work work --head "$ANALYSED_SHA" --out "$RUNNER_TEMP/run/patch.diff"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: generate
+          path: |
+            ${{ runner.temp }}/run/patch.diff
+            ${{ runner.temp }}/run/patch.diff.sha256
+            ${{ runner.temp }}/run/report.json
+            ${{ runner.temp }}/run/transcript.jsonl
+            ${{ runner.temp }}/run/guard.jsonl
+            ${{ runner.temp }}/run/agent-stop.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  verify:
+    needs: [plan, generate]
+    if: needs.generate.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    concurrency:
+      group: test-agent-${{ inputs.mode }}-${{ inputs.pr_number || inputs.app }}
+      cancel-in-progress: true
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443 api.github.com:443 codeload.github.com:443
+            objects.githubusercontent.com:443 *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443 registry.npmjs.org:443 nodejs.org:443
+            registry-1.docker.io:443 auth.docker.io:443 production.cloudflare.docker.com:443
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: work
+          ref: ${{ env.ANALYSED_SHA }}
+          persist-credentials: false
+      - uses: ./trusted/.github/actions/prepare
+        with:
+          trusted: trusted
+          work: work
+          image: ${{ env.TEST_AGENT_IMAGE }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: '{plan,generate}'
+          merge-multiple: true
+          path: ${{ runner.temp }}/in
+      - name: Verify the patch independently of the model
+        run: |
+          IN="$RUNNER_TEMP/in"
+          mkdir -p "$RUNNER_TEMP/verify"
+          node trusted/tools/test-agent/src/cli/verify.ts \
+            --trusted trusted --work work --run-dir "$RUNNER_TEMP/verify" \
+            --plan "$IN/plan.json" --patch "$IN/patch.diff" --patch-sha256 "$IN/patch.diff.sha256" \
+            --report "$IN/report.json" --transcript "$IN/transcript.jsonl" --guard-log "$IN/guard.jsonl" \
+            --agent-stop "$(cat "$IN/agent-stop.txt" 2>/dev/null || echo unknown)" \
+            --out "$IN/verdict.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verdict
+          path: ${{ runner.temp }}/in/verdict.json
+          retention-days: 7
+
+  publish:
+    needs: [plan, generate, verify]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: ${{ inputs.mode == 'backfill' && 'test-agent-backfill' || 'test-agent-pr' }}
+    permissions:
+      contents: read
+    concurrency:
+      group: test-agent-publish-${{ inputs.mode }}-${{ inputs.pr_number || inputs.app }}
+      cancel-in-progress: false
+    steps:
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443 api.github.com:443 codeload.github.com:443
+            objects.githubusercontent.com:443 *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443 registry.npmjs.org:443 nodejs.org:443
+      - id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.TEST_AGENT_APP_ID }}
+          private-key: ${{ secrets.TEST_AGENT_APP_PRIVATE_KEY }}
+      - id: bot
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          id="$(gh api "/users/${SLUG}%5Bbot%5D" --jq .id)"
+          echo "name=${SLUG}[bot]" >> "$GITHUB_OUTPUT"
+          echo "email=${id}+${SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: trusted
+          persist-credentials: false
+      # The only checkout that keeps credentials: publish pushes the bot commit from here. No PR
+      # code runs in this job (git and the GitHub API only), so the token never meets PR code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: work
+          ref: ${{ env.ANALYSED_SHA }}
+          token: ${{ steps.app.outputs.token }}
+          persist-credentials: true
+      - uses: ./trusted/.github/actions/prepare
+        with:
+          trusted: trusted
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          pattern: '{plan,generate,verdict}'
+          merge-multiple: true
+          path: ${{ runner.temp }}/in
+      - name: Publish the check run, comment and bot commit
+        env:
+          TEST_AGENT_APP_TOKEN: ${{ steps.app.outputs.token }}
+          TEST_AGENT_BOT_LOGIN: ${{ vars.TEST_AGENT_BOT_LOGIN }}
+          TEST_AGENT_BOT_NAME: ${{ steps.bot.outputs.name }}
+          TEST_AGENT_BOT_EMAIL: ${{ steps.bot.outputs.email }}
+          TEST_AGENT_MODEL: ${{ vars.TEST_AGENT_MODEL || 'claude-sonnet-5-5' }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          BASE_REF: ${{ inputs.base_ref }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          IN="$RUNNER_TEMP/in"
+          args=(--plan "$IN/plan.json" --verdict "$IN/verdict.json"
+                --patch "$IN/patch.diff" --patch-sha256 "$IN/patch.diff.sha256"
+                --report "$IN/report.json" --transcript "$IN/transcript.jsonl"
+                --work work --run-id "$GITHUB_RUN_ID")
+          if [ "$MODE" = pr ]; then args+=(--pr-number "$PR_NUMBER" --head-sha "$ANALYSED_SHA"); fi
+          if [ "$MODE" = backfill ]; then args+=(--base-ref "$BASE_REF"); fi
+          node trusted/tools/test-agent/src/cli/publish.ts "${args[@]}"

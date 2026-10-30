@@ -1,0 +1,8 @@
+# Files that decide what the test agent may do and how its output is judged (ADR 0013).
+/.claude/                      @dawid-fulmes
+/.github/                      @dawid-fulmes
+/tools/test-agent/             @dawid-fulmes
+/backend/vitest.config.*       @dawid-fulmes
+/backend/tsconfig*.json        @dawid-fulmes
+/frontend/vite.config.*        @dawid-fulmes
+/frontend/tsconfig*.json       @dawid-fulmes
