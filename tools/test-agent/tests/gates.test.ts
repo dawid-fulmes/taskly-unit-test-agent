@@ -393,6 +393,104 @@ describe('checkPatch round 3 bypasses', () => {
   })
 })
 
+describe('checkPatch round 4 bypasses', () => {
+  it.each([
+    's01_import_line_parenhook',
+    's02_import_line_hookalias',
+    's03_ternary_alias_fails',
+    's04_optbracket_fails',
+    's05_arrow_concat_fails',
+    's06_mod_expect_extend',
+    's07_mod_ternary_hook',
+    's08_mod_import_line_optional',
+    's09_mod_hex_string',
+    's10_new_ternary_vi_mod',
+  ])('%s is rejected', (name) => {
+    const r = check(fixture(name))
+    expect(r.ok).toBe(false)
+    expect(r.violations.length).toBeGreaterThan(0)
+  })
+
+  it.each([
+    ['s01_import_line_parenhook', 'weakening'],
+    ['s02_import_line_hookalias', 'weakening'],
+    ['s03_ternary_alias_fails', 'weakening'],
+    ['s04_optbracket_fails', 'forbidden-call'],
+    ['s06_mod_expect_extend', 'weakening'],
+    ['s10_new_ternary_vi_mod', 'weakening'],
+  ])('%s reports %s', (name, rule) => {
+    expect(rules(fixture(name))).toContain(rule)
+  })
+
+  const added = (line: string) =>
+    `diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts\nnew file mode 100644\n--- /dev/null\n+++ b/backend/tests/a.test.ts\n@@ -0,0 +1,2 @@\n+expect(1)\n+${line}\n`
+  const mod = (line: string) =>
+    `diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts\n--- a/backend/tests/a.test.ts\n+++ b/backend/tests/a.test.ts\n@@ -3,0 +4 @@\n+${line}\n`
+
+  it.each([
+    'const s = 1 ? it : 0',
+    'const s = 1 ? test: 0',
+    'const s = a ? b : describe',
+    'const o = { a: 1, b: c ? it : 0 }',
+    'run(1 ? it : 0)',
+    ';(t => t.x)(it)',
+    'wrap(a, test)',
+    'const all = [it, test]',
+    'expect.extend({ toBe: () => ({ pass: true }) })',
+    'expect . extend({})',
+    'expect?.extend({})',
+    "expect['extend']({})",
+    "expect?.['extend']({})",
+    'expect.addSnapshotSerializer({})',
+    "expect['addSnapshotSerializer']({})",
+    "it?.['fa' + 'ils']('z', () => {})",
+    "it ?. ['only']('z', () => {})",
+    "test?.('z', () => {})",
+    'describe?.only',
+    "bench?.['skip']('z', () => {})",
+    "const k = '\\x73kip'",
+  ])('new files reject %j', (line) => {
+    expect(rules(added(line)).length).toBeGreaterThan(0)
+  })
+
+  it.each([
+    "import 'vitest'; (beforeEach)(() => { vi.restoreAllMocks() })",
+    "import 'vitest'; const h = afterAll",
+    "import 'vitest'; const m = 1 ? vi : 0",
+    "import { vi } from 'vitest'; const h = afterEach",
+    "import 'vitest' // beforeAll",
+    "import { a } from 'b'; vi",
+    "expect.extend({ toBe: () => ({ pass: true, message: () => '' }) })",
+  ])('modified files reject %j', (line) => {
+    expect(rules(mod(line))).toContain('weakening')
+  })
+
+  it('does not flag plain imports, object keys or ordinary ternaries', () => {
+    for (const l of [
+      "import { vi } from 'vitest'",
+      "import { describe, expect, it, vi } from 'vitest';",
+      "import type { Todo } from '../src/types.ts'",
+      "import request, { agent } from 'supertest'",
+      "import express from 'express'",
+      "import '../src/setup.ts'",
+      'const x = vi.fn()',
+    ])
+      expect(rules(mod(l))).toEqual([])
+    for (const l of [
+      'const o = { a: 1, it: 2 }',
+      'const o = { test: 1 }',
+      'const o = {a: 1,describe : 2}',
+      'const v = flag ? 1 : 2',
+      'expect(flag ? 1 : 2).toBe(1)',
+      "it('handles a, b and c', () => {})",
+      "test('returns 404, then retries', () => {})",
+      "const s = 'extend'",
+      'expect(obj.extend).toBeDefined()',
+    ])
+      expect(rules(added(l))).toEqual([])
+  })
+})
+
 describe('stripEvidence', () => {
   it('drops evidence sections and keeps the rest byte-identical', () => {
     const text = fixture('evidence-mixed')

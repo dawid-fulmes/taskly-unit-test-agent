@@ -38,13 +38,19 @@ function normalise(text: string): string {
 }
 
 const RUNNERS = '(?:it|test|describe|suite|bench)'
-const BRACKET_ACCESS = new RegExp(`\\b${RUNNERS}\\s*\\[`)
+// `it[...]`, `it?.[...]` and `it?.(...)` all count as bracket/computed access.
+const BRACKET_ACCESS = new RegExp(`\\b${RUNNERS}\\s*(?:\\[|\\?\\.\\s*[[(])`)
+const RUNNER_OPTIONAL = new RegExp(`\\b${RUNNERS}\\s*\\?\\.`)
 const SKIP_ALIAS =
   /\b(?:it|test|describe|suite)(?:\.\w+)*\.(?:skip|only|todo|fails|skipIf|runIf)\b/
 
 const MODIFIER_STRING =
   /(['"`])(?:skip|only|todo|fails|skipIf|runIf|concurrent|sequential)\1/
 const UNICODE_ESCAPE = /\\u[0-9a-fA-F]{4}|\\u\{/
+const HEX_ESCAPE = /\\x[0-9a-fA-F]{2}/
+// `x['fa' + 'ils']`: a computed member name assembled from string pieces.
+const CONCAT_MEMBER =
+  /\[\s*(['"`])[^'"`\n]*\1\s*\+|\+\s*(['"`])[^'"`\n]*\2\s*\]/
 
 /** Reasons a chunk of added text declares skipped/focused tests (may span lines). */
 function forbiddenCallReasons(text: string, calls: string[]): string[] {
@@ -53,9 +59,13 @@ function forbiddenCallReasons(text: string, calls: string[]): string[] {
   const call = calls.find((c) => n.includes(c))
   if (call) out.push(call)
   if (BRACKET_ACCESS.test(n)) out.push('bracket access on test function')
+  if (RUNNER_OPTIONAL.test(n)) out.push('optional chaining on test function')
   if (SKIP_ALIAS.test(n)) out.push('skip/only/todo/fails modifier')
   if (MODIFIER_STRING.test(text)) out.push('modifier name used as a string')
   if (UNICODE_ESCAPE.test(text)) out.push('unicode escape not allowed')
+  if (HEX_ESCAPE.test(text)) out.push('hex escape not allowed')
+  if (CONCAT_MEMBER.test(n))
+    out.push('computed member name built by string concatenation')
   return out
 }
 
@@ -79,15 +89,37 @@ const MODIFIED_ONLY: [RegExp, string][] = [
 const NAMES = 'it|test|describe|suite|bench|vi|expect'
 // Assignment `=` that is not part of ==, ===, !=, !==, <=, >=, =>.
 const ASSIGN_RHS = /(?<![=!<>])=(?![=>])([^;\n]*)/g
-// Bare reference to a test global: not a property (`.it`), not a call/member, not an object key.
-const BARE_GLOBAL = new RegExp(`(?<![.\\w$])(?:${NAMES})\\b(?!\\s*[.(:])`)
+// Bare reference to a test global: not a property (`.it`), not a call/member.
+// A following `:` is exempt only in object-key position (directly after `{` or `,`),
+// so the ternary branch `1 ? it : 0` is still a bare reference.
+const BARE_GLOBAL = new RegExp(
+  `(?<![.\\w$])(?:${NAMES})\\b(?!\\s*[.(:])|(?<![.\\w$])(?<![{,]\\s*)(?:${NAMES})\\s*:`,
+)
 const CALL_ALIAS = new RegExp(
   `(?<![=!<>])=(?![=>])\\s*(?:${NAMES})\\b(?!\\s*\\()(?!\\.(?:fn|spyOn)\\()(?!\\.(?:any|anything|objectContaining|arrayContaining|stringContaining|stringMatching)\\()`,
 )
+// A test global passed or combined as a value: `f(it)`, `[it, test]`, `a ? it : b`,
+// `{ k: it }`, `...it`. Object keys (`{ a: 1, it: 2 }`) and arrow params `(a, it) =>` are exempt.
+const AS_VALUE = new RegExp(
+  `(?:[(\\[,?:!]|&&|\\|\\||\\.\\.\\.)\\s*(?:${NAMES})\\b\\s*(?:[,\\]};?\\n]|&&|\\|\\||$|\\)(?!\\s*=>)|(?<!,\\s*(?:${NAMES})\\s*):)`,
+)
 const IMPORT_AS = /\bimport\s*(?:type\s*)?(?:\{[^}]*\bas\s+|\*\s*as\s+)/
+// Whole import statements only; anything else sharing the line is kept and checked.
+const IMPORT_STATEMENTS = [
+  /(^|\n)[ \t]*import\s+(?:type\s+)?(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)(?:\s*,\s*\{[^}]*\})?\s*from\s*(['"])[^'"\n]+\2[ \t]*;?[ \t]*(?=\n|$)/g,
+  /(^|\n)[ \t]*import\s*(['"])[^'"\n]+\2[ \t]*;?[ \t]*(?=\n|$)/g,
+]
 const HOOK_TOKENS = 'beforeEach|beforeAll|afterEach|afterAll|vi'
 const HOOK_OPTIONAL = new RegExp(`\\b(?:${HOOK_TOKENS})\\s*\\?\\.`)
 const HOOK_BARE = new RegExp(`(?<![.\\w$])(?:${HOOK_TOKENS})\\b(?!\\s*[.(])`)
+const EXPECT_PATCH =
+  /\bexpect\s*(?:\?\.\s*)?(?:\.|\[\s*['"`]\s*)(?:extend|addSnapshotSerializer)\b|\bexpect\s*\?\.\s*(?:extend|addSnapshotSerializer)\b|\baddSnapshotSerializer\b/
+const EXPECT_INDIRECT = /\bexpect\s*(?:\?\.|\[)/
+
+/** Drop statements that are wholly an import, keeping line structure. */
+function stripImports(n: string): string {
+  return IMPORT_STATEMENTS.reduce((t, re) => t.replace(re, '$1'), n)
+}
 
 function aliasesGlobal(n: string): boolean {
   if (CALL_ALIAS.test(n)) return true
@@ -99,21 +131,23 @@ function aliasesGlobal(n: string): boolean {
 /** Reasons a chunk of added text weakens tests (may span lines). */
 function weakeningReasons(text: string, modified: boolean): string[] {
   const n = normalise(text)
+  const code = stripImports(n)
   const out: string[] = []
   if (SHADOW_DECL.test(n) || SHADOW_ASSIGN.test(n))
     out.push('declares or reassigns a test global')
   if (/\bexpect\.assertions\(\s*0\s*\)/.test(n))
     out.push('expect.assertions(0)')
+  if (EXPECT_PATCH.test(n))
+    out.push('expect.extend/addSnapshotSerializer not allowed')
+  if (EXPECT_INDIRECT.test(n))
+    out.push('optional chaining or bracket access on expect')
   if (aliasesGlobal(n)) out.push('aliases or destructures a test global')
+  if (AS_VALUE.test(code)) out.push('test global used as a value')
   if (IMPORT_AS.test(n)) out.push('renaming import')
   if (/\bReflect\s*\./.test(n)) out.push('Reflect usage')
   if (modified) {
     for (const [re, why] of MODIFIED_ONLY) if (re.test(n)) out.push(why)
-    const body = n
-      .split('\n')
-      .filter((l) => !/^\s*import\b/.test(l))
-      .join('\n')
-    if (HOOK_OPTIONAL.test(n) || HOOK_BARE.test(body))
+    if (HOOK_OPTIONAL.test(n) || HOOK_BARE.test(code))
       out.push('indirect hook/vi reference in existing test file')
   }
   return out
