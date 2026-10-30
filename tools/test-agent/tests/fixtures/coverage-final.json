@@ -1,0 +1,97 @@
+{
+  "/app/src/math.ts": {
+    "path": "/app/src/math.ts",
+    "statementMap": {
+      "0": {
+        "start": {
+          "line": 2
+        },
+        "end": {
+          "line": 2
+        }
+      },
+      "1": {
+        "start": {
+          "line": 6
+        },
+        "end": {
+          "line": 8
+        }
+      },
+      "2": {
+        "start": {
+          "line": 7
+        },
+        "end": {
+          "line": 7
+        }
+      },
+      "3": {
+        "start": {
+          "line": 9
+        },
+        "end": {
+          "line": 11
+        }
+      },
+      "4": {
+        "start": {
+          "line": 10
+        },
+        "end": {
+          "line": 10
+        }
+      },
+      "5": {
+        "start": {
+          "line": 12
+        },
+        "end": {
+          "line": 12
+        }
+      }
+    },
+    "s": {
+      "0": 1,
+      "1": 1,
+      "2": 1,
+      "3": 0,
+      "4": 0,
+      "5": 0
+    }
+  },
+  "/app/src/unused.ts": {
+    "path": "/app/src/unused.ts",
+    "statementMap": {
+      "0": {
+        "start": {
+          "line": 2
+        },
+        "end": {
+          "line": 2
+        }
+      },
+      "1": {
+        "start": {
+          "line": 3
+        },
+        "end": {
+          "line": 3
+        }
+      },
+      "2": {
+        "start": {
+          "line": 4
+        },
+        "end": {
+          "line": 4
+        }
+      }
+    },
+    "s": {
+      "0": 0,
+      "1": 0,
+      "2": 0
+    }
+  }
+}

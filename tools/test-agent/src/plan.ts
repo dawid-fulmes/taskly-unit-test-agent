@@ -56,7 +56,11 @@ export function renamedIntoSource(diffText: string, policy: Policy): string[] {
     .map((d) => d.newPath as string)
 }
 
-function excludedOnBase(path: string, app: App, globs: string[]): boolean {
+export function excludedOnBase(
+  path: string,
+  app: App,
+  globs: string[],
+): boolean {
   const rel = path.slice(app.length + 1)
   return globs.length > 0 && picomatch(globs, { dot: true })(rel)
 }

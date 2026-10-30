@@ -8,6 +8,8 @@ try {
   const { loadPolicy } = await import('../policy.ts')
   const { buildPlan, renamedIntoSource } = await import('../plan.ts')
   const { readCoverageExcludes } = await import('../config-excludes.ts')
+  const { buildBackfillPlan, normalizeCoverage } =
+    await import('../coverage.ts')
 
   const { values } = parseArgs({
     options: {
@@ -18,6 +20,9 @@ try {
       trusted: { type: 'string' },
       work: { type: 'string' },
       out: { type: 'string' },
+      app: { type: 'string' },
+      'max-files': { type: 'string' },
+      coverage: { type: 'string' },
     },
     strict: true,
   })
@@ -26,11 +31,48 @@ try {
     if (typeof v !== 'string' || v === '') throw new Error(`missing --${k}`)
     return v
   }
-  if (need('mode') !== 'pr') throw new Error('only --mode pr is supported')
+  const mode = need('mode')
+  if (mode !== 'pr' && mode !== 'backfill')
+    throw new Error('--mode must be pr or backfill')
   const base = need('base')
+  const trusted = need('trusted')
+  const readExcludes = (app: 'backend' | 'frontend') =>
+    readCoverageExcludes(
+      readFileSync(
+        join(
+          trusted,
+          app === 'backend'
+            ? 'backend/vitest.config.ts'
+            : 'frontend/vite.config.ts',
+        ),
+        'utf8',
+      ),
+    )
+
+  if (mode === 'backfill') {
+    const app = need('app')
+    if (app !== 'backend' && app !== 'frontend')
+      throw new Error(`unknown --app: ${app}`)
+    const maxFiles = Number(need('max-files'))
+    if (!Number.isInteger(maxFiles) || maxFiles < 1)
+      throw new Error('--max-files must be a positive integer')
+    const raw = JSON.parse(readFileSync(need('coverage'), 'utf8'))
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
+      throw new Error('invalid --coverage')
+    const plan = buildBackfillPlan({
+      cov: normalizeCoverage(raw, '/app', app),
+      app,
+      policy: loadPolicy(),
+      maxFiles,
+      excludes: readExcludes(app),
+      baseSha: base,
+    })
+    writeFileSync(need('out'), `${JSON.stringify(plan, null, 2)}\n`)
+    process.exit(0)
+  }
+
   const head = need('head')
   const work = need('work')
-  const trusted = need('trusted')
 
   const git = async (...args: string[]) => {
     const r = await exec('git', args, { cwd: work })
@@ -81,12 +123,8 @@ try {
     baseSha: base,
     headSha: head,
     baseExcludes: {
-      backend: readCoverageExcludes(
-        readFileSync(join(trusted, 'backend/vitest.config.ts'), 'utf8'),
-      ),
-      frontend: readCoverageExcludes(
-        readFileSync(join(trusted, 'frontend/vite.config.ts'), 'utf8'),
-      ),
+      backend: readExcludes('backend'),
+      frontend: readExcludes('frontend'),
     },
   })
   writeFileSync(need('out'), `${JSON.stringify(plan, null, 2)}\n`)

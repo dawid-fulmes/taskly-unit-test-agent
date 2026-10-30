@@ -1,0 +1,113 @@
+{
+  "numTotalTests": 7,
+  "numPassedTests": 0,
+  "numFailedTests": 7,
+  "numPendingTests": 0,
+  "numTodoTests": 0,
+  "snapshot": {
+    "added": 0,
+    "failure": false,
+    "filesAdded": 0,
+    "filesRemoved": 0,
+    "filesRemovedList": [],
+    "filesUnmatched": 0,
+    "filesUpdated": 0,
+    "matched": 0,
+    "total": 0,
+    "unchecked": 0,
+    "uncheckedKeysByFile": [],
+    "unmatched": 0,
+    "updated": 0,
+    "didUpdate": false
+  },
+  "startTime": 0,
+  "success": false,
+  "testResults": [
+    {
+      "assertionResults": [
+        {
+          "ancestorTitles": [],
+          "fullName": "assertion fail",
+          "status": "failed",
+          "title": "assertion fail",
+          "duration": 0,
+          "failureMessages": [
+            "AssertionError: expected 1 to be 2 // Object.is equality\n    at /app/tests/assert.test.ts:2:40\n    at file:///app/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [],
+          "fullName": "deep fail",
+          "status": "failed",
+          "title": "deep fail",
+          "duration": 0,
+          "failureMessages": [
+            "AssertionError: expected { a: 1 } to deeply equal { a: 2 }\n    at /app/tests/assert.test.ts:3:42\n    at file:///app/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [],
+          "fullName": "match fail",
+          "status": "failed",
+          "title": "match fail",
+          "duration": 0,
+          "failureMessages": [
+            "AssertionError: expected 'abc' to match /x/\n    at /app/tests/assert.test.ts:4:40\n    at file:///app/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [],
+          "fullName": "typeerror",
+          "status": "failed",
+          "title": "typeerror",
+          "duration": 0,
+          "failureMessages": [
+            "TypeError: Cannot read properties of undefined (reading 'foo')\n    at /app/tests/assert.test.ts:5:55\n    at file:///app/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [],
+          "fullName": "thrown error",
+          "status": "failed",
+          "title": "thrown error",
+          "duration": 0,
+          "failureMessages": [
+            "Error: boom\n    at /app/tests/assert.test.ts:6:34\n    at file:///app/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [],
+          "fullName": "thrown assert",
+          "status": "failed",
+          "title": "thrown assert",
+          "duration": 0,
+          "failureMessages": [
+            "AssertionError: expected [Function] to throw an error\n    at Proxy.<anonymous> (file:///app/node_modules/@vitest/expect/dist/index.js:1552:16)\n    at Proxy.<anonymous> (file:///app/node_modules/@vitest/expect/dist/index.js:1156:15)"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [],
+          "fullName": "explicit",
+          "status": "failed",
+          "title": "explicit",
+          "duration": 0,
+          "failureMessages": [
+            "AssertionError: nope\n    at /app/tests/assert.test.ts:8:31\n    at file:///app/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11"
+          ],
+          "meta": {}
+        }
+      ],
+      "startTime": 0,
+      "endTime": 0,
+      "status": "failed",
+      "message": "",
+      "name": "/app/tests/assert.test.ts"
+    }
+  ]
+}

@@ -1,0 +1,99 @@
+{
+  "numTotalTests": 7,
+  "numPassedTests": 4,
+  "numFailedTests": 0,
+  "numPendingTests": 2,
+  "numTodoTests": 1,
+  "snapshot": {
+    "added": 0,
+    "failure": false,
+    "filesAdded": 0,
+    "filesRemoved": 0,
+    "filesRemovedList": [],
+    "filesUnmatched": 0,
+    "filesUpdated": 0,
+    "matched": 0,
+    "total": 0,
+    "unchecked": 0,
+    "uncheckedKeysByFile": [],
+    "unmatched": 0,
+    "updated": 0,
+    "didUpdate": false
+  },
+  "startTime": 0,
+  "success": true,
+  "testResults": [
+    {
+      "assertionResults": [
+        {
+          "ancestorTitles": ["math", "add"],
+          "fullName": "math add adds",
+          "status": "passed",
+          "title": "adds",
+          "duration": 0,
+          "failureMessages": [],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": ["math"],
+          "fullName": "math sign pos",
+          "status": "passed",
+          "title": "sign pos",
+          "duration": 0,
+          "failureMessages": [],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": ["math"],
+          "fullName": "math skipped one",
+          "status": "skipped",
+          "title": "skipped one",
+          "failureMessages": [],
+          "meta": {},
+          "duration": 0
+        },
+        {
+          "ancestorTitles": ["math"],
+          "fullName": "math todo one",
+          "status": "todo",
+          "title": "todo one",
+          "failureMessages": [],
+          "meta": {},
+          "duration": 0
+        },
+        {
+          "ancestorTitles": ["math"],
+          "fullName": "math fails mode",
+          "status": "passed",
+          "title": "fails mode",
+          "duration": 0,
+          "failureMessages": [],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": ["math"],
+          "fullName": "math runtime fails",
+          "status": "passed",
+          "title": "runtime fails",
+          "duration": 0,
+          "failureMessages": [],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": ["math"],
+          "fullName": "math conditionally skipped",
+          "status": "skipped",
+          "title": "conditionally skipped",
+          "duration": 0,
+          "failureMessages": [],
+          "meta": {}
+        }
+      ],
+      "startTime": 0,
+      "endTime": 0,
+      "status": "passed",
+      "message": "",
+      "name": "/app/tests/ok.test.ts"
+    }
+  ]
+}
