@@ -5,6 +5,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -122,6 +123,12 @@ it('sees no host secret', () => {
     expect(has('backend', '.', 'lightningcss-linux-')).toBe(true)
     expect(has('frontend', '@esbuild', 'linux-')).toBe(true)
     expect(has('frontend', '@rollup', 'rollup-linux-')).toBe(true)
+  })
+
+  it('does not leave root-owned files in the workspace', () => {
+    expect(statSync(path.join(work, 'backend/node_modules')).uid).toBe(
+      process.getuid?.(),
+    )
   })
 
   it('runs backend tests with natively installed (ignore-scripts) binaries', () => {

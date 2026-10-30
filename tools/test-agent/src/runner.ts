@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { exec, type ExecOptions, type ExecResult } from './exec.ts'
 import { isEvidencePath, isTestPath, type Policy } from './policy.ts'
 import type { App } from './types.ts'
 
@@ -9,6 +10,11 @@ export interface ContainerRun {
   command: string[]
   env?: Record<string, string>
   network: 'none' | 'default'
+  /** Unique container name, used to kill it on timeout. */
+  name: string
+  timeoutMs: number
+  /** `${uid}:${gid}`; never root. */
+  user: string
 }
 
 // Same character class as the guard's Bash pattern.
@@ -52,8 +58,23 @@ export function dockerArgv(run: ContainerRun): string[] {
   return [
     'run',
     '--rm',
+    '--init',
+    '--name',
+    run.name,
     '--network',
     run.network,
+    '--user',
+    run.user,
+    '--memory',
+    '4g',
+    '--cpus',
+    '2',
+    '--pids-limit',
+    '512',
+    '--cap-drop',
+    'ALL',
+    '--security-opt',
+    'no-new-privileges',
     '--env-file',
     '/dev/null',
     '-e',
@@ -100,4 +121,21 @@ export function vitestCommand(opts: {
   }
   command.push(...(opts.files ?? []))
   return command
+}
+
+export interface RunContainerDeps {
+  exec: (cmd: string, args: string[], opts?: ExecOptions) => Promise<ExecResult>
+}
+
+/** Runs the container; on timeout kills it by name (killing the docker client alone would not). */
+export async function runContainer(
+  run: ContainerRun,
+  deps: RunContainerDeps = { exec },
+): Promise<ExecResult> {
+  const result = await deps.exec('docker', dockerArgv(run), {
+    timeoutMs: run.timeoutMs,
+    env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+  })
+  if (result.timedOut) await deps.exec('docker', ['kill', run.name])
+  return result
 }

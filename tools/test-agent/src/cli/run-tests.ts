@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -11,28 +12,38 @@ function requireEnv(name: string): string {
   return value
 }
 
+const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000
+
 let resultsDir: string | null = null
 try {
-  const { exec } = await import('../exec.ts')
   const { loadPolicy } = await import('../policy.ts')
-  const { dockerArgv, parseRunnerArgs, vitestCommand } =
+  const { parseRunnerArgs, runContainer, vitestCommand } =
     await import('../runner.ts')
   const workDir = requireEnv('TEST_AGENT_WORK_DIR')
   requireEnv('TEST_AGENT_TRUSTED_DIR')
   const image = requireEnv('TEST_AGENT_IMAGE')
   const { app, files } = parseRunnerArgs(process.argv.slice(2), loadPolicy())
   resultsDir = mkdtempSync(path.join(tmpdir(), 'test-agent-results-'))
-  const result = await exec(
-    'docker',
-    dockerArgv({
-      image,
-      appDir: path.join(workDir, app),
-      resultsDir,
-      command: vitestCommand({ files, outputName: 'run' }),
-      network: 'none',
-    }),
-    { env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' } },
+  const timeoutMs = Number(
+    process.env.TEST_AGENT_RUN_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS,
   )
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error('invalid TEST_AGENT_RUN_TIMEOUT_MS')
+  }
+  if (process.getuid === undefined || process.getgid === undefined) {
+    throw new Error('uid/gid unavailable')
+  }
+  const result = await runContainer({
+    image,
+    appDir: path.join(workDir, app),
+    resultsDir,
+    command: vitestCommand({ files, outputName: 'run' }),
+    network: 'none',
+    name: `test-agent-${process.pid}-${randomBytes(4).toString('hex')}`,
+    timeoutMs,
+    user: `${process.getuid()}:${process.getgid()}`,
+  })
+  if (result.timedOut) throw new Error(`timed out after ${timeoutMs} ms`)
   let json = ''
   try {
     json = readFileSync(path.join(resultsDir, 'run.json'), 'utf8')

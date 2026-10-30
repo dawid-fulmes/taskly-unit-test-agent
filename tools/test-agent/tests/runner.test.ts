@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { loadPolicy } from '../src/policy.ts'
-import { dockerArgv, parseRunnerArgs, vitestCommand } from '../src/runner.ts'
+import {
+  dockerArgv,
+  parseRunnerArgs,
+  runContainer,
+  vitestCommand,
+} from '../src/runner.ts'
 import { decide, realpathLoose } from '../src/guard.ts'
 
 const policy = loadPolicy()
@@ -91,6 +96,9 @@ describe('dockerArgv', () => {
     resultsDir: '/tmp/results',
     command: ['npx', 'vitest', 'run'],
     network: 'none' as const,
+    name: 'ta-1',
+    timeoutMs: 1000,
+    user: '1000:1000',
   }
 
   it('never passes host env, even when ANTHROPIC_API_KEY is set', () => {
@@ -108,8 +116,23 @@ describe('dockerArgv', () => {
     expect(dockerArgv(run)).toEqual([
       'run',
       '--rm',
+      '--init',
+      '--name',
+      'ta-1',
       '--network',
       'none',
+      '--user',
+      '1000:1000',
+      '--memory',
+      '4g',
+      '--cpus',
+      '2',
+      '--pids-limit',
+      '512',
+      '--cap-drop',
+      'ALL',
+      '--security-opt',
+      'no-new-privileges',
       '--env-file',
       '/dev/null',
       '-e',
@@ -140,7 +163,9 @@ describe('dockerArgv', () => {
 
   it('supports the default network', () => {
     const argv = dockerArgv({ ...run, network: 'default' })
-    expect(argv.slice(0, 4)).toEqual(['run', '--rm', '--network', 'default'])
+    expect(
+      argv.slice(argv.indexOf('--network'), argv.indexOf('--network') + 2),
+    ).toEqual(['--network', 'default'])
   })
 })
 
@@ -169,5 +194,49 @@ describe('vitestCommand', () => {
     const cmd = vitestCommand({ shuffle: true, seed: 2, outputName: 'x' })
     expect(cmd).toContain('--sequence.shuffle=true')
     expect(cmd).toContain('--sequence.seed=2')
+  })
+})
+
+describe('runContainer', () => {
+  const run = {
+    image: 'node:22',
+    appDir: '/work/backend',
+    resultsDir: '/tmp/results',
+    command: ['npx', 'vitest', 'run'],
+    network: 'none' as const,
+    name: 'ta-2',
+    timeoutMs: 50,
+    user: '1:1',
+  }
+
+  it('returns the result without killing when the run finishes', async () => {
+    const calls: string[][] = []
+    const result = await runContainer(run, {
+      exec: async (_cmd, args) => {
+        calls.push(args)
+        return { code: 0, stdout: 'o', stderr: '', timedOut: false }
+      },
+    })
+    expect(result).toMatchObject({ code: 0, stdout: 'o', timedOut: false })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toEqual(dockerArgv(run))
+  })
+
+  it('kills the named container on timeout and reports it', async () => {
+    const calls: { cmd: string; args: string[]; timeoutMs?: number }[] = []
+    const result = await runContainer(run, {
+      exec: async (cmd, args, opts) => {
+        calls.push({ cmd, args, timeoutMs: opts?.timeoutMs })
+        return calls.length === 1
+          ? { code: 137, stdout: '', stderr: '', timedOut: true }
+          : { code: 0, stdout: '', stderr: '', timedOut: false }
+      },
+    })
+    expect(result.timedOut).toBe(true)
+    expect(calls[0]?.timeoutMs).toBe(50)
+    expect(calls[1]).toMatchObject({
+      cmd: 'docker',
+      args: ['kill', 'ta-2'],
+    })
   })
 })

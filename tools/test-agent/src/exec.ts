@@ -11,9 +11,10 @@ export interface ExecResult {
   code: number
   stdout: string
   stderr: string
+  timedOut: boolean
 }
 
-/** Runs a command without a shell. Never rejects on a non-zero exit; spawn failures yield code 127. */
+/** Runs a command without a shell; on timeout the child is SIGKILLed and `timedOut` is set. Never rejects on a non-zero exit; spawn failures yield code 127. */
 export function exec(
   cmd: string,
   args: string[],
@@ -24,8 +25,15 @@ export function exec(
       cwd: opts.cwd,
       env: opts.env,
       stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: opts.timeoutMs,
     })
+    let timedOut = false
+    const timer =
+      opts.timeoutMs === undefined
+        ? null
+        : setTimeout(() => {
+            timedOut = true
+            child.kill('SIGKILL')
+          }, opts.timeoutMs)
     let stdout = ''
     let stderr = ''
     child.stdout.setEncoding('utf8')
@@ -34,10 +42,22 @@ export function exec(
     child.stderr.on('data', (chunk: string) => (stderr += chunk))
     child.stdin.on('error', () => {})
     child.on('error', (error) => {
-      resolve({ code: 127, stdout, stderr: stderr + error.message })
+      if (timer) clearTimeout(timer)
+      resolve({
+        code: 127,
+        stdout,
+        stderr: stderr + error.message,
+        timedOut,
+      })
     })
     child.on('close', (code, signal) => {
-      resolve({ code: code ?? (signal ? 128 : 1), stdout, stderr })
+      if (timer) clearTimeout(timer)
+      resolve({
+        code: code ?? (signal ? 128 : 1),
+        stdout,
+        stderr,
+        timedOut,
+      })
     })
     child.stdin.end(opts.input ?? '')
   })
