@@ -559,7 +559,9 @@ export async function publishRun(
     body = withOutcomeMarker(renderComment(v, null, args.meta), v.outcome)
   }
 
-  body = withHeadMarker(body, plan.headSha)
+  // The SHA this run reports on: its bot commit if it pushed one, otherwise the analysed head.
+  const reportedSha = pushedSha ?? plan.headSha
+  body = withHeadMarker(body, reportedSha)
   const log = deps.log ?? (() => {})
   const sleep =
     deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
@@ -601,15 +603,24 @@ export async function publishRun(
           args.meta.runUrl,
         ),
       )
-    // A comment about another head that is the PR's current head was written by a newer run:
-    // this (stale) run must not overwrite it.
+    // Never overwrite a newer run's comment. Ours (same analysed head or same reported SHA) is
+    // replaced. A head-moved run is stale by definition, so it keeps any comment about another
+    // head; any other run keeps a comment whose SHA is the PR's current head (a newer run's,
+    // possibly its bot commit).
     const keepNewer = async (existing: string): Promise<boolean> => {
       const prev = headFromComment(existing)
-      if (plan.mode !== 'pr' || prev === null || prev === plan.headSha)
+      if (
+        plan.mode !== 'pr' ||
+        prev === null ||
+        prev === plan.headSha ||
+        prev === reportedSha
+      )
         return false
-      const pull = await getPull(o, deps.repo, prNumber)
-      if (pull?.head.sha !== prev) return false
-      log(`kept the newer comment for the current head ${prev}`)
+      if (v.outcome !== 'head-moved') {
+        const pull = await getPull(o, deps.repo, prNumber)
+        if (pull?.head.sha !== prev) return false
+      }
+      log(`kept the newer comment for ${prev}`)
       return true
     }
     await retry(() =>

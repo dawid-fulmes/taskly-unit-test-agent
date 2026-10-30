@@ -844,6 +844,97 @@ describe('fix round 1: idempotent publish and newer comments', () => {
     expect(log.join('\n')).toMatch(/newer/)
   })
 
+  it('keeps the newer comment when the newer run pushed a bot commit', async () => {
+    const { gh, state } = fakeGitHub()
+    // The author pushes Y after this run (X) was planned.
+    const other = path.join(w.root, 'other')
+    sh(w.root, 'clone', '-q', '--branch', 'feature', w.remote, other)
+    await fs.writeFile(
+      path.join(other, 'backend/src/a.ts'),
+      'export const a = 1\nexport const b = 3\n',
+    )
+    sh(other, '-c', 'core.hooksPath=/dev/null', 'commit', '-q', '-am', 'newer')
+    sh(other, 'push', '-q', '--no-verify', 'origin', 'feature')
+    const y = w.remoteSha('feature')
+
+    // The newer run (analysed Y) publishes first and pushes its bot commit Z.
+    sh(w.work, 'fetch', '-q', 'origin', 'feature')
+    sh(w.work, 'checkout', '-q', '--detach', y)
+    const newer = await publishRun(
+      await args(patch(), { plan: plan({ headSha: y }) }),
+      deps(gh),
+    )
+    const z = w.remoteSha('feature')
+    expect(newer).toMatchObject({ outcome: 'tests-added', checkSha: z })
+    const newerBody = state.comments[0]!.body
+    // The marker records the SHA the run reported on: the bot commit.
+    expect(headFromComment(newerBody)).toBe(z)
+    state.pulls.set(7, {
+      number: 7,
+      draft: false,
+      head: { sha: z, ref: 'feature', repo: { full_name: 'acme/taskly' } },
+      base: { ref: 'main', repo: { full_name: 'acme/taskly' } },
+      labels: [],
+      user: { login: 'alice' },
+    })
+
+    // The stale run (analysed X) publishes later: CAS fails, head-moved.
+    sh(w.work, 'checkout', '-q', '--detach', w.headSha)
+    const log: string[] = []
+    const stale = await publishRun(await args(patch()), deps(gh, log))
+    expect(stale.outcome).toBe('head-moved')
+    expect(state.comments).toHaveLength(1)
+    expect(state.comments[0]!.body).toBe(newerBody)
+    expect(log.join('\n')).toMatch(/newer/)
+
+    // A stale run that does not commit keeps it too (marker equals the current PR head).
+    const a = await args('')
+    a.verdict = verdict({
+      outcome: 'verification-failed',
+      commitAllowed: false,
+    })
+    await publishRun(a, deps(gh))
+    expect(state.comments[0]!.body).toBe(newerBody)
+  })
+
+  it('a head-moved run never overwrites a comment about another head', async () => {
+    const { gh, state } = fakeGitHub()
+    const body = `${COMMENT_MARKER}\n<!-- test-agent:head ${'e'.repeat(40)} -->\n\n## other run\n`
+    state.comments.push({ id: 1, body, user: { login: BOT } })
+    // The PR head is some third commit; no getPull is needed for this decision.
+    w.intercept = async (a) =>
+      a.includes('push')
+        ? {
+            code: 1,
+            stdout: '',
+            stderr: ' ! [rejected] HEAD -> feature (stale info)\n',
+          }
+        : null
+    const r = await publishRun(await args(patch()), deps(gh))
+    expect(r.outcome).toBe('head-moved')
+    expect(state.comments[0]!.body).toBe(body)
+    expect(state.calls.some((c) => c.method === 'pulls.get')).toBe(false)
+  })
+
+  it('a head-moved run still replaces its own earlier comment for the same head', async () => {
+    const { gh, state } = fakeGitHub()
+    state.comments.push({
+      id: 1,
+      body: `${COMMENT_MARKER}\n<!-- test-agent:head ${w.headSha} -->\n\n## earlier\n`,
+      user: { login: BOT },
+    })
+    w.intercept = async (a) =>
+      a.includes('push')
+        ? {
+            code: 1,
+            stdout: '',
+            stderr: ' ! [rejected] HEAD -> feature (stale info)\n',
+          }
+        : null
+    await publishRun(await args(patch()), deps(gh))
+    expect(state.comments[0]!.body).toContain(verdictLine('head-moved'))
+  })
+
   it('replaces a comment for an older head that is no longer the PR head', async () => {
     const { gh, state } = fakeGitHub()
     const older = 'e'.repeat(40)
