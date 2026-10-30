@@ -17,6 +17,8 @@ const GIT_ENV = (): Record<string, string> => ({
   GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_CONFIG_NOSYSTEM: '1',
   GIT_TERMINAL_PROMPT: '0',
+  // Paths are always literal: a `*` or `[` in a file name never acts as a glob.
+  GIT_LITERAL_PATHSPECS: '1',
 })
 
 /** Runs git with the hardened env and returns the raw result (never throws on a git failure). */

@@ -6,6 +6,7 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   COMMENT_MARKER,
+  headFromComment,
   outcomeFromComment,
   verdictLine,
   type RunMeta,
@@ -24,7 +25,7 @@ import {
 import type { Plan } from '../src/types.ts'
 import type { Verdict } from '../src/verdict.ts'
 import { emptyNumbers } from '../src/verify/numbers.ts'
-import { fakeGitHub } from './github-fake.ts'
+import { fakeGitHub, HttpError } from './github-fake.ts'
 import { addedFileDiff } from './verify-harness.ts'
 
 const repo = { owner: 'acme', repo: 'taskly' }
@@ -70,7 +71,12 @@ interface World {
   intercept: (
     args: string[],
     cwd: string,
-  ) => Promise<{ code: number; stdout: string; stderr: string } | null>
+  ) => Promise<{
+    code: number
+    stdout: string
+    stderr: string
+    timedOut?: boolean
+  } | null>
   exec: typeof realExec
   writePatch: (text: string) => Promise<string>
   remoteSha: (branch: string) => string
@@ -134,7 +140,7 @@ async function makeWorld(): Promise<World> {
     exec: async (cmd, args, opts = {}) => {
       world.calls.push({ cmd, args, opts })
       const fake = await world.intercept(args, opts.cwd ?? '')
-      if (fake) return { ...fake, timedOut: false }
+      if (fake) return { timedOut: false, ...fake }
       return realExec(cmd, args, opts)
     },
     async writePatch(text) {
@@ -668,5 +674,275 @@ describe('early outcomes and artifact validation', () => {
     expect(isPlan({ ...plan(), headSha: 'x' })).toBe(false)
     expect(isPlan({ ...plan(), prNumber: null })).toBe(false)
     expect(isPlan({ ...plan(), earlyOutcome: 'defect' })).toBe(false)
+  })
+})
+
+describe('fix round 1: idempotent publish and newer comments', () => {
+  const sleeps: number[] = []
+  const deps = (gh: ReturnType<typeof fakeGitHub>['gh'], log?: string[]) => ({
+    exec: w.exec,
+    octokit: gh,
+    repo,
+    sleep: async (ms: number) => {
+      sleeps.push(ms)
+    },
+    log: (line: string) => log?.push(line),
+  })
+  beforeEach(() => {
+    sleeps.length = 0
+  })
+  const patch = () => addedFileDiff(NEW_TEST, NEW_TEST_TEXT)
+
+  it('retries 5xx, 429 and network errors with 2/4 s backoff', async () => {
+    const { gh, state } = fakeGitHub()
+    const create = gh.rest.checks.create
+    const errors: unknown[] = [new HttpError(502), new HttpError(429)]
+    gh.rest.checks.create = async (p) => {
+      const e = errors.shift()
+      if (e) throw e
+      return create(p)
+    }
+    const r = await publishRun(await args(patch()), deps(gh))
+    expect(r.outcome).toBe('tests-added')
+    expect(sleeps).toEqual([2000, 4000])
+    expect(checks(state)).toHaveLength(1)
+
+    const { gh: gh2 } = fakeGitHub()
+    const net = gh2.rest.issues.listComments
+    let failed = false
+    gh2.rest.issues.listComments = async (p) => {
+      if (!failed) {
+        failed = true
+        throw new TypeError('fetch failed')
+      }
+      return net(p)
+    }
+    sleeps.length = 0
+    const a = await args('')
+    a.verdict = verdict({
+      outcome: 'verification-failed',
+      commitAllowed: false,
+    })
+    await publishRun(a, deps(gh2))
+    expect(sleeps).toEqual([2000])
+  })
+
+  it('does not retry a 4xx and names the pushed SHA', async () => {
+    const { gh } = fakeGitHub()
+    gh.rest.checks.create = async () => {
+      throw new HttpError(422)
+    }
+    const err = (await publishRun(await args(patch()), deps(gh)).catch(
+      (e: unknown) => e,
+    )) as Error
+    expect(err).toBeInstanceOf(Error)
+    expect(err.message).toContain(w.remoteSha('feature'))
+    expect(sleeps).toEqual([])
+  })
+
+  it('a re-run after the API failed reproduces the same bot commit and reports on it', async () => {
+    const { gh, state } = fakeGitHub()
+    const create = gh.rest.checks.create
+    gh.rest.checks.create = async () => {
+      throw new HttpError(503)
+    }
+    const err = (await publishRun(await args(patch()), deps(gh)).catch(
+      (e: unknown) => e,
+    )) as Error
+    const pushed = w.remoteSha('feature')
+    expect(pushed).not.toBe(w.headSha)
+    expect(err.message).toContain(pushed)
+    expect(err.message).toMatch(/re-run/)
+    expect(sleeps).toEqual([2000, 4000, 8000])
+    expect(checks(state)).toHaveLength(0)
+
+    // The re-run job starts from a fresh checkout of the analysed head.
+    sh(w.work, 'checkout', '-q', '--detach', w.headSha)
+    gh.rest.checks.create = create
+    w.calls = []
+    const r = await publishRun(await args(patch()), deps(gh))
+    expect(r).toMatchObject({ outcome: 'tests-added', checkSha: pushed })
+    expect(w.remoteSha('feature')).toBe(pushed)
+    expect(checks(state)[0]!.params).toMatchObject({
+      head_sha: pushed,
+      conclusion: 'success',
+    })
+    // Bot commit dates are those of the analysed head, not the wall clock.
+    expect(sh(w.remote, 'log', '-1', '--format=%at %ct', pushed)).toBe(
+      sh(w.remote, 'log', '-1', '--format=%ct %ct', w.headSha),
+    )
+  })
+
+  it('a backfill re-run reuses the branch and the already opened PR', async () => {
+    const { gh, state } = fakeGitHub()
+    sh(w.work, 'checkout', '-q', '--detach', w.baseSha)
+    const p = plan({ mode: 'backfill', prNumber: null, headSha: w.baseSha })
+    const make = async () => {
+      const a = await args(patch(), { plan: p, headRef: null, baseRef: 'main' })
+      a.verdict = verdict({ mode: 'backfill', patchSha256: sha256(patch()) })
+      return a
+    }
+    const create = gh.rest.checks.create
+    gh.rest.checks.create = async () => {
+      throw new HttpError(500)
+    }
+    await expect(publishRun(await make(), deps(gh))).rejects.toThrow(/re-run/)
+    const pushed = w.remoteSha('test-agent/backfill-backend-123')
+    sh(w.work, 'checkout', '-q', '--detach', w.baseSha)
+    gh.rest.checks.create = create
+    const r = await publishRun(await make(), deps(gh))
+    expect(r).toMatchObject({ checkSha: pushed, prNumber: 100 })
+    expect(state.created).toHaveLength(1)
+    expect(checks(state)[0]!.params).toMatchObject({ head_sha: pushed })
+  })
+
+  it('embeds the analysed head in the comment, right after the report marker', async () => {
+    const { gh, state } = fakeGitHub()
+    const a = await args('')
+    a.verdict = verdict({
+      outcome: 'verification-failed',
+      commitAllowed: false,
+    })
+    await publishRun(a, deps(gh))
+    const body = state.comments[0]!.body
+    expect(body.split('\n').slice(0, 2)).toEqual([
+      COMMENT_MARKER,
+      `<!-- test-agent:head ${w.headSha} -->`,
+    ])
+    expect(headFromComment(body)).toBe(w.headSha)
+    expect(outcomeFromComment(body)).toBe('verification-failed')
+  })
+
+  it("does not overwrite a newer run's comment for the current PR head", async () => {
+    const { gh, state } = fakeGitHub()
+    const newer = 'e'.repeat(40)
+    const newerBody = `${COMMENT_MARKER}\n<!-- test-agent:head ${newer} -->\n\n## newer run\n`
+    state.comments.push({ id: 1, body: newerBody, user: { login: BOT } })
+    state.pulls.set(7, {
+      number: 7,
+      draft: false,
+      head: { sha: newer, ref: 'feature', repo: { full_name: 'acme/taskly' } },
+      base: { ref: 'main', repo: { full_name: 'acme/taskly' } },
+      labels: [],
+      user: { login: 'alice' },
+    })
+    w.intercept = async (a) =>
+      a.includes('push')
+        ? {
+            code: 1,
+            stdout: '',
+            stderr: ' ! [rejected] HEAD -> feature (stale info)\n',
+          }
+        : null
+    const log: string[] = []
+    const r = await publishRun(await args(patch()), deps(gh, log))
+    expect(r.outcome).toBe('head-moved')
+    expect(state.comments[0]!.body).toBe(newerBody)
+    expect(
+      state.calls.filter((c) => c.method === 'issues.updateComment'),
+    ).toHaveLength(0)
+    expect(log.join('\n')).toMatch(/newer/)
+  })
+
+  it('replaces a comment for an older head that is no longer the PR head', async () => {
+    const { gh, state } = fakeGitHub()
+    const older = 'e'.repeat(40)
+    state.comments.push({
+      id: 1,
+      body: `${COMMENT_MARKER}\n<!-- test-agent:head ${older} -->\n\n## old\n`,
+      user: { login: BOT },
+    })
+    state.pulls.set(7, {
+      number: 7,
+      draft: false,
+      head: {
+        sha: w.headSha,
+        ref: 'feature',
+        repo: { full_name: 'acme/taskly' },
+      },
+      base: { ref: 'main', repo: { full_name: 'acme/taskly' } },
+      labels: [],
+      user: { login: 'alice' },
+    })
+    const a = await args('')
+    a.verdict = verdict({
+      outcome: 'verification-failed',
+      commitAllowed: false,
+    })
+    await publishRun(a, deps(gh))
+    expect(headFromComment(state.comments[0]!.body)).toBe(w.headSha)
+  })
+
+  const commitAttributes = async (attrs: string) => {
+    await fs.writeFile(path.join(w.work, '.gitattributes'), attrs)
+    sh(w.work, 'add', '.gitattributes')
+    sh(w.work, '-c', 'core.hooksPath=/dev/null', 'commit', '-q', '-m', 'attrs')
+    sh(w.work, 'push', '-q', '--no-verify', 'origin', 'HEAD:refs/heads/feature')
+    return sh(w.work, 'rev-parse', 'HEAD')
+  }
+
+  it('rejects a commit whose blob differs from the gated bytes (clean conversion on git add)', async () => {
+    const { gh, state } = fakeGitHub()
+    // A clean-only conversion: `git apply` writes the patch bytes, `git add` stores others.
+    sh(w.work, 'config', 'filter.upper.clean', 'tr a-z A-Z')
+    const head = await commitAttributes(`${NEW_TEST} filter=upper\n`)
+    const r = await publishRun(
+      await args(addedFileDiff(NEW_TEST, NEW_TEST_TEXT), {
+        plan: plan({ headSha: head }),
+      }),
+      deps(gh),
+    )
+    expect(r.outcome).toBe('patch-rejected')
+    expect(state.comments[0]!.body).toMatch(/committed blob differs/)
+    expect(pushes()).toHaveLength(0)
+    expect(w.remoteSha('feature')).toBe(head)
+  })
+
+  it('rejects a test file that .gitattributes eol=crlf converts', async () => {
+    const { gh } = fakeGitHub()
+    const head = await commitAttributes('*.ts text eol=crlf\n')
+    const r = await publishRun(
+      await args(addedFileDiff(NEW_TEST, NEW_TEST_TEXT), {
+        plan: plan({ headSha: head }),
+      }),
+      deps(gh),
+    )
+    expect(r.outcome).toBe('patch-rejected')
+    expect(pushes()).toHaveLength(0)
+  })
+
+  it('runs every git command with literal pathspecs', async () => {
+    const { gh } = fakeGitHub()
+    await publishRun(await args(patch()), deps(gh))
+    expect(w.calls.length).toBeGreaterThan(0)
+    expect(
+      w.calls.every((c) => c.opts?.env?.GIT_LITERAL_PATHSPECS === '1'),
+    ).toBe(true)
+  })
+
+  it('a push that timed out but landed counts as pushed', async () => {
+    const { gh, state } = fakeGitHub()
+    w.intercept = async (a, cwd) => {
+      if (!a.includes('push')) return null
+      await realExec('git', a, { cwd, env: GIT_ENV })
+      return { code: 128, stdout: '', stderr: '', timedOut: true }
+    }
+    const r = await publishRun(await args(patch()), deps(gh))
+    const pushed = w.remoteSha('feature')
+    expect(pushed).not.toBe(w.headSha)
+    expect(r).toMatchObject({ outcome: 'tests-added', checkSha: pushed })
+    expect(w.calls.some((c) => c.args.includes('ls-remote'))).toBe(true)
+    expect(checks(state)[0]!.params).toMatchObject({ head_sha: pushed })
+  })
+
+  it('a push that timed out and did not land is a pipeline error', async () => {
+    const { gh } = fakeGitHub()
+    w.intercept = async (a) =>
+      a.includes('push')
+        ? { code: 128, stdout: '', stderr: '', timedOut: true }
+        : null
+    const r = await publishRun(await args(patch()), deps(gh))
+    expect(r.outcome).toBe('pipeline-error')
+    expect(w.remoteSha('feature')).toBe(w.headSha)
   })
 })

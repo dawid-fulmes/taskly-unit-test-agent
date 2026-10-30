@@ -3,8 +3,10 @@ import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
+  headFromComment,
   renderComment,
   verdictLine,
+  withHeadMarker,
   withOutcomeMarker,
   type RunMeta,
 } from './comment.ts'
@@ -13,9 +15,11 @@ import { RETRY_LARGE_LABEL } from './filter.ts'
 import { stripEvidence } from './gates.ts'
 import {
   createCheckRun,
+  getPull,
   openPullRequest,
   removeLabel,
   upsertComment,
+  withRetry,
   type GitHub,
   type Repo,
 } from './github.ts'
@@ -68,6 +72,8 @@ export interface PublishDeps {
   /** Trusted policy; defaults to the package's own policy.json. */
   policy?: Policy
   log?: (line: string) => void
+  /** Backoff between GitHub API retries; injected by tests. */
+  sleep?: (ms: number) => Promise<void>
 }
 
 export interface PublishResult {
@@ -351,11 +357,21 @@ async function commitAndPush(
       content.map((x) => `publish: ${x.file}: ${x.rule} (${x.detail})`),
     )
 
+  // Deterministic commit: fixed identity and the analysed head's committer date, so a re-run of
+  // this job rebuilds the same SHA and its push is a no-op instead of a stale-lease rejection.
+  const committed = (
+    await git(exec, workDir, ['log', '-1', '--format=%ct', plan.headSha])
+  ).trim()
+  if (!/^\d+$/.test(committed))
+    return failed('cannot read the analysed head commit date')
+  const date = `@${committed} +0000`
   const identity = {
     GIT_AUTHOR_NAME: args.botName,
     GIT_AUTHOR_EMAIL: args.botEmail,
+    GIT_AUTHOR_DATE: date,
     GIT_COMMITTER_NAME: args.botName,
     GIT_COMMITTER_EMAIL: args.botEmail,
+    GIT_COMMITTER_DATE: date,
   }
   await git(exec, workDir, ['add', '--force', '--', ...testPaths])
   await git(
@@ -382,6 +398,20 @@ async function commitAndPush(
   const expected = new Set(testPaths)
   if (changed.length !== expected.size || changed.some((p) => !expected.has(p)))
     return reject(['publish: the commit does not match the gated test files'])
+  // The committed blobs must be the bytes the gates saw: `.gitattributes` (text, eol, ident,
+  // working-tree-encoding) can make `git add` store something else.
+  for (const p of testPaths) {
+    const blob = (
+      await git(exec, workDir, ['rev-parse', '--verify', `${sha}:${p}`])
+    ).trim()
+    const raw = (
+      await git(exec, workDir, ['hash-object', '--no-filters', '--', p])
+    ).trim()
+    if (blob !== raw)
+      return reject([
+        `publish: ${p}: committed blob differs from the gated bytes (.gitattributes conversion)`,
+      ])
+  }
 
   const lease =
     plan.mode === 'pr'
@@ -396,7 +426,19 @@ async function commitAndPush(
     `HEAD:refs/heads/${branch}`,
     lease,
   ])
-  if (push.code !== 0 || push.timedOut) {
+  if (push.timedOut) {
+    // The push may still have landed: trust only what the remote now has.
+    log('git push timed out; checking the remote branch')
+    const remote = await gitResult(exec, workDir, [
+      'ls-remote',
+      'origin',
+      `refs/heads/${branch}`,
+    ])
+    const at = remote.code === 0 ? remote.stdout.trim().split(/\s+/)[0] : null
+    if (at === sha) return { ok: true, sha }
+    return failed('git push timed out')
+  }
+  if (push.code !== 0) {
     log(`git push failed (code ${push.code}): ${push.stderr.slice(0, 500)}`)
     if (plan.mode === 'pr' && PUSH_REJECTED.test(push.stderr))
       return {
@@ -517,45 +559,77 @@ export async function publishRun(
     body = withOutcomeMarker(renderComment(v, null, args.meta), v.outcome)
   }
 
-  let prNumber = plan.mode === 'pr' ? plan.prNumber! : null
-  if (plan.mode === 'backfill') {
+  body = withHeadMarker(body, plan.headSha)
+  const log = deps.log ?? (() => {})
+  const sleep =
+    deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
+  const retry = <T>(fn: () => Promise<T>) => withRetry(fn, sleep)
+
+  if (plan.mode === 'backfill' && (pushedSha === null || branch === null))
     // Nothing reached a branch: there is no PR to report on (the job summary shows the comment).
-    if (pushedSha === null || branch === null)
-      return {
-        outcome: v.outcome,
-        checkSha: null,
-        prNumber: null,
-        comment: body,
-      }
-    const app = backfillApp(plan)!
-    prNumber = await openPullRequest(
-      o,
-      deps.repo,
-      branch,
-      args.baseRef!,
-      `test(agent): backfill ${app} unit tests`,
-      `Backfill of ${app} unit tests by the test agent (run ${args.runId}).\n\nThe tests were verified before this branch was pushed; the test-agent comment below has the details.\n`,
+    return { outcome: v.outcome, checkSha: null, prNumber: null, comment: body }
+
+  try {
+    let prNumber: number
+    if (plan.mode === 'backfill') {
+      const app = backfillApp(plan)!
+      prNumber = await retry(() =>
+        openPullRequest(
+          o,
+          deps.repo,
+          branch!,
+          args.baseRef!,
+          `test(agent): backfill ${app} unit tests`,
+          `Backfill of ${app} unit tests by the test agent (run ${args.runId}).\n\nThe tests were verified before this branch was pushed; the test-agent comment below has the details.\n`,
+        ),
+      )
+    } else prNumber = plan.prNumber!
+
+    // Review Focus 5: when the head moved, no check run is created by this run at all
+    // (not on the old SHA, and the new head belongs to the newer run).
+    const checkSha =
+      v.outcome === 'head-moved' ? null : (pushedSha ?? plan.headSha)
+    if (checkSha !== null)
+      await retry(() =>
+        createCheckRun(
+          o,
+          deps.repo,
+          checkSha,
+          v.conclusion,
+          verdictLine(v.outcome),
+          checkSummary(v),
+          args.meta.runUrl,
+        ),
+      )
+    // A comment about another head that is the PR's current head was written by a newer run:
+    // this (stale) run must not overwrite it.
+    const keepNewer = async (existing: string): Promise<boolean> => {
+      const prev = headFromComment(existing)
+      if (plan.mode !== 'pr' || prev === null || prev === plan.headSha)
+        return false
+      const pull = await getPull(o, deps.repo, prNumber)
+      if (pull?.head.sha !== prev) return false
+      log(`kept the newer comment for the current head ${prev}`)
+      return true
+    }
+    await retry(() =>
+      upsertComment(o, deps.repo, prNumber, body, args.botLogin, keepNewer),
+    )
+    if (plan.mode === 'pr')
+      await retry(() =>
+        removeLabel(o, deps.repo, prNumber, RETRY_LARGE_LABEL),
+      ).catch((error: unknown) =>
+        log(
+          `could not remove ${RETRY_LARGE_LABEL}: ${(error as Error).message}`,
+        ),
+      )
+    return { outcome: v.outcome, checkSha, prNumber, comment: body }
+  } catch (error) {
+    if (pushedSha === null) throw error
+    throw new Error(
+      `pushed ${pushedSha} to ${branch} but reporting to GitHub failed (${(error as Error).message}); re-run the publish job: it rebuilds the same commit and finishes reporting.`,
     )
   }
-
-  // Review Focus 5: when the head moved, no check run is created by this run at all
-  // (not on the old SHA, and the new head belongs to the newer run).
-  const checkSha =
-    v.outcome === 'head-moved' ? null : (pushedSha ?? plan.headSha)
-  if (checkSha !== null)
-    await createCheckRun(
-      o,
-      deps.repo,
-      checkSha,
-      v.conclusion,
-      verdictLine(v.outcome),
-      checkSummary(v),
-      args.meta.runUrl,
-    )
-  await upsertComment(o, deps.repo, prNumber!, body, args.botLogin)
-  if (plan.mode === 'pr')
-    await removeLabel(o, deps.repo, prNumber!, RETRY_LARGE_LABEL)
-  return { outcome: v.outcome, checkSha, prNumber, comment: body }
 }
 
 type Obj = Record<string, unknown>

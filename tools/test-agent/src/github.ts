@@ -80,6 +80,9 @@ export interface GitHub {
         p: Repo & { head: string; base: string; title: string; body: string },
       ): Promise<{ data: { number: number } }>
       get(p: Repo & { pull_number: number }): Promise<{ data: PullData }>
+      list(
+        p: Repo & { head?: string; state?: 'open'; per_page?: number },
+      ): Promise<{ data: { number: number }[] }>
     }
     repos: {
       getCollaboratorPermissionLevel(
@@ -132,17 +135,24 @@ export async function findOwnComment(
   return null
 }
 
+/**
+ * Updates our sticky comment or creates it. `keep` may veto replacing an existing comment
+ * (e.g. one written by a newer run); returns false when nothing was written.
+ */
 export async function upsertComment(
   o: GitHub,
   repo: Repo,
   pr: number,
   body: string,
   botLogin: string,
-): Promise<void> {
+  keep?: (existingBody: string) => Promise<boolean>,
+): Promise<boolean> {
   const own = await findOwnComment(o, repo, pr, botLogin)
-  if (own)
+  if (own) {
+    if (keep && (await keep(own.body))) return false
     await o.rest.issues.updateComment({ ...repo, comment_id: own.id, body })
-  else await o.rest.issues.createComment({ ...repo, issue_number: pr, body })
+  } else await o.rest.issues.createComment({ ...repo, issue_number: pr, body })
+  return true
 }
 
 export async function createCheckRun(
@@ -203,6 +213,7 @@ export async function removeLabel(
   }
 }
 
+/** Opens the PR; when one is already open for `head` (a re-run, GitHub answers 422) returns it. */
 export async function openPullRequest(
   o: GitHub,
   repo: Repo,
@@ -211,14 +222,50 @@ export async function openPullRequest(
   title: string,
   body: string,
 ): Promise<number> {
-  const { data } = await o.rest.pulls.create({
-    ...repo,
-    head,
-    base,
-    title,
-    body,
-  })
-  return data.number
+  try {
+    const { data } = await o.rest.pulls.create({
+      ...repo,
+      head,
+      base,
+      title,
+      body,
+    })
+    return data.number
+  } catch (error) {
+    if (httpStatus(error) !== 422) throw error
+    const { data } = await o.rest.pulls.list({
+      ...repo,
+      head: `${repo.owner}:${head}`,
+      state: 'open',
+      per_page: 2,
+    })
+    if (data.length === 1) return data[0]!.number
+    throw error
+  }
+}
+
+export const RETRY_DELAYS_MS = [2000, 4000, 8000] as const
+
+/** 5xx, 429 and errors without an HTTP status (network) are transient; other 4xx are not. */
+export function isTransient(error: unknown): boolean {
+  const s = httpStatus(error)
+  return s === null || s >= 500 || s === 429
+}
+
+/** Runs `fn`, retrying transient failures after 2, 4 and 8 seconds. */
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  sleep: (ms: number) => Promise<void>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn()
+    } catch (error) {
+      const delay = RETRY_DELAYS_MS[attempt]
+      if (delay === undefined || !isTransient(error)) throw error
+      await sleep(delay)
+    }
+  }
 }
 
 const PERMISSIONS = ['admin', 'write', 'read', 'none'] as const

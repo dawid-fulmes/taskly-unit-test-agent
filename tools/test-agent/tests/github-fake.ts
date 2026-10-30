@@ -129,9 +129,21 @@ export function fakeGitHub(appId = 42) {
       pulls: {
         async create(p) {
           rec('pulls.create', p)
+          // GitHub answers 422 when an open PR for the head branch already exists.
+          if (state.created.some((c) => c.head === p.head))
+            throw new HttpError(422)
           const number = state.created.length + 100
           state.created.push({ ...p, number })
           return { data: { number } }
+        },
+        async list(p) {
+          rec('pulls.list', p)
+          const branch = p.head?.split(':')[1]
+          return {
+            data: state.created
+              .filter((c) => c.head === branch)
+              .map((c) => ({ number: c.number })),
+          }
         },
         async get(p) {
           rec('pulls.get', p)

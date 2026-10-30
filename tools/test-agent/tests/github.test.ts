@@ -9,6 +9,7 @@ import {
   openPullRequest,
   removeLabel,
   upsertComment,
+  withRetry,
 } from '../src/github.ts'
 import { fakeGitHub, HttpError } from './github-fake.ts'
 
@@ -161,5 +162,57 @@ describe('getPermission', () => {
     expect(await getPermission(gh, repo, 'bob')).toBe('write')
     expect(await getPermission(gh, repo, 'eve')).toBe('none')
     expect(await getPermission(gh, repo, 'nobody')).toBe('none')
+  })
+})
+
+describe('withRetry', () => {
+  it('retries transient errors up to three times, then rethrows', async () => {
+    const sleeps: number[] = []
+    let calls = 0
+    await expect(
+      withRetry(
+        async () => {
+          calls++
+          throw new HttpError(500)
+        },
+        async (ms) => {
+          sleeps.push(ms)
+        },
+      ),
+    ).rejects.toThrow('HTTP 500')
+    expect(calls).toBe(4)
+    expect(sleeps).toEqual([2000, 4000, 8000])
+  })
+
+  it('does not retry a 404', async () => {
+    let calls = 0
+    await expect(
+      withRetry(
+        async () => {
+          calls++
+          throw new HttpError(404)
+        },
+        async () => {},
+      ),
+    ).rejects.toThrow('HTTP 404')
+    expect(calls).toBe(1)
+  })
+})
+
+describe('openPullRequest on a re-run', () => {
+  it('returns the PR already open for the branch', async () => {
+    const { gh } = fakeGitHub()
+    expect(await openPullRequest(gh, repo, 'b', 'main', 'T', 'B')).toBe(100)
+    expect(await openPullRequest(gh, repo, 'b', 'main', 'T', 'B')).toBe(100)
+  })
+
+  it('rethrows a 422 when no open PR exists for the branch', async () => {
+    const { gh } = fakeGitHub()
+    gh.rest.pulls.create = async () => {
+      throw new HttpError(422)
+    }
+    await expect(
+      openPullRequest(gh, repo, 'b', 'main', 'T', 'B'),
+    ).rejects.toThrow('HTTP 422')
   })
 })

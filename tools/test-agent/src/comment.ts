@@ -510,3 +510,21 @@ export function dismissComment(
   const out = kept.join('\n')
   return outcome === null ? out : withOutcomeMarker(out, outcome)
 }
+
+const HEAD_MARKER = /^<!-- test-agent:head ([0-9a-f]{40}) -->$/
+
+/** Puts the analysed head SHA on the line after the report marker (replacing an earlier one). */
+export function withHeadMarker(body: string, headSha: string): string {
+  if (!/^[0-9a-f]{40}$/.test(headSha)) return body
+  const lines = body.split('\n')
+  if (lines[0] !== COMMENT_MARKER) return body
+  const marker = `<!-- test-agent:head ${headSha} -->`
+  if (HEAD_MARKER.test(lines[1] ?? '')) lines[1] = marker
+  else lines.splice(1, 0, marker)
+  return lines.join('\n')
+}
+
+export function headFromComment(body: string): string | null {
+  const line = body.replace(/\r\n/g, '\n').split('\n')[1] ?? ''
+  return HEAD_MARKER.exec(line)?.[1] ?? null
+}
