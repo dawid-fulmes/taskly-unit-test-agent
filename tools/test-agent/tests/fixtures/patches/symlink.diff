@@ -1,0 +1,8 @@
+diff --git a/backend/tests/link.test.ts b/backend/tests/link.test.ts
+new file mode 120000
+index 0000000..91bf449
+--- /dev/null
++++ b/backend/tests/link.test.ts
+@@ -0,0 +1 @@
++../../../etc/passwd
+\ No newline at end of file

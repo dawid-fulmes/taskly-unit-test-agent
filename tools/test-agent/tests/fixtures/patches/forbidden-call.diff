@@ -1,0 +1,13 @@
+diff --git a/backend/tests/fc.test.ts b/backend/tests/fc.test.ts
+new file mode 100644
+index 0000000..e27a3eb
+--- /dev/null
++++ b/backend/tests/fc.test.ts
+@@ -0,0 +1,7 @@
++import { it, expect } from "vitest"
++it.only("x", () => {
++  expect(1).toBe(1)
++})
++it.only ("y", () => {
++  expect(1).toBe(1)
++})

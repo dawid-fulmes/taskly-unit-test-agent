@@ -1,0 +1,4 @@
+diff --git a/backend/src/foo.ts b/backend/tests/foo.test.ts
+similarity index 100%
+rename from backend/src/foo.ts
+rename to backend/tests/foo.test.ts
