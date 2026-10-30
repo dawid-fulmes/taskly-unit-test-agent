@@ -150,6 +150,83 @@ describe('readVitestJson', () => {
   })
 })
 
+describe('readVitestJson fail-closed report checks', () => {
+  const file = (
+    name: string,
+    assertions: unknown[] = [],
+    status = 'passed',
+  ) => ({
+    name,
+    status,
+    message: '',
+    assertionResults: assertions,
+  })
+  const t = (status: string) => ({ fullName: 'x', status, failureMessages: [] })
+
+  it('rejects an empty testResults', () => {
+    expect(() => readVitestJson({ testResults: [] }, 'backend')).toThrow(
+      /empty/,
+    )
+  })
+
+  it('rejects success:false when nothing failed', () => {
+    expect(() =>
+      readVitestJson(
+        {
+          success: false,
+          testResults: [file('/app/tests/a.test.ts', [t('passed')])],
+        },
+        'backend',
+      ),
+    ).toThrow(/success/)
+  })
+
+  it('rejects counts that disagree with the report totals', () => {
+    const results = [file('/app/tests/a.test.ts', [t('passed')])]
+    expect(() =>
+      readVitestJson({ numTotalTests: 2, testResults: results }, 'backend'),
+    ).toThrow(/numTotalTests/)
+    expect(() =>
+      readVitestJson({ numFailedTests: 1, testResults: results }, 'backend'),
+    ).toThrow(/numFailedTests/)
+  })
+
+  it('rejects dot, empty and backslash segments', () => {
+    for (const name of [
+      '/app/tests/./a.test.ts',
+      '/app/tests//a.test.ts',
+      '/app/tests\\a.test.ts',
+    ])
+      expect(() =>
+        readVitestJson({ testResults: [file(name)] }, 'backend'),
+      ).toThrow(/outside/)
+  })
+
+  it('rejects a duplicate file', () => {
+    expect(() =>
+      readVitestJson(
+        {
+          testResults: [
+            file('/app/tests/a.test.ts'),
+            file('/app/tests/a.test.ts'),
+          ],
+        },
+        'backend',
+      ),
+    ).toThrow(/duplicate/)
+  })
+
+  it('counts an unknown test status as failed and keeps the raw status', () => {
+    const r = readVitestJson(
+      { testResults: [file('/app/tests/a.test.ts', [t('weird')])] },
+      'backend',
+    )
+    expect(r.failed).toBe(1)
+    expect(r.tests[0]?.status).toBe('weird')
+    expect(r.failures[0]).toMatchObject({ isAssertion: false })
+  })
+})
+
 describe('discoveryMismatch', () => {
   it('returns expected files that were not executed', () => {
     expect(discoveryMismatch(['a', 'b'], ['a'])).toEqual(['b'])

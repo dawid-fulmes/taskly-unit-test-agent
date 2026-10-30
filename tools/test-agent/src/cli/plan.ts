@@ -59,6 +59,7 @@ try {
     const raw = JSON.parse(readFileSync(need('coverage'), 'utf8'))
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
       throw new Error('invalid --coverage')
+    if (Object.keys(raw).length === 0) throw new Error('empty --coverage')
     const plan = buildBackfillPlan({
       cov: normalizeCoverage(raw, '/app', app),
       app,

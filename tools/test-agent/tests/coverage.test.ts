@@ -58,22 +58,33 @@ describe('normalizeCoverage', () => {
     expect(cov['backend/src/math.ts']?.path).toBe('backend/src/math.ts')
   })
 
-  it('drops files outside the app root', () => {
-    const cov = normalizeCoverage(
-      { '/elsewhere/x.ts': entry('/elsewhere/x.ts', [1], [1]) },
-      '/app',
-      'frontend',
-    )
-    expect(cov).toEqual({})
+  it('throws on a key outside the app root instead of dropping it', () => {
+    expect(() =>
+      normalizeCoverage(
+        { '/elsewhere/x.ts': entry('/elsewhere/x.ts', [1], [1]) },
+        '/app',
+        'frontend',
+      ),
+    ).toThrow(/outside/)
+    expect(() =>
+      normalizeCoverage(
+        { '/application/x.ts': entry('/application/x.ts', [1], [1]) },
+        '/app',
+        'backend',
+      ),
+    ).toThrow(/outside/)
   })
 
-  it('does not match a sibling directory sharing the root prefix', () => {
-    const cov = normalizeCoverage(
-      { '/application/x.ts': entry('/application/x.ts', [1], [1]) },
-      '/app',
-      'backend',
-    )
-    expect(cov).toEqual({})
+  it('rejects dot, empty and backslash segments', () => {
+    for (const key of [
+      '/app/a/./b.ts',
+      '/app//b.ts',
+      '/app/a/../b.ts',
+      '/app/a\\b.ts',
+    ])
+      expect(() =>
+        normalizeCoverage({ [key]: entry(key, [1], [1]) }, '/app', 'backend'),
+      ).toThrow(/outside/)
   })
 })
 

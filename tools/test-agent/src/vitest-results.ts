@@ -43,7 +43,10 @@ function repoPath(name: string, app: App): string {
   if (!name.startsWith(CONTAINER_ROOT))
     fail(`path outside the app root: ${name}`)
   const rest = name.slice(CONTAINER_ROOT.length)
-  if (rest === '' || rest.split('/').some((p) => p === '..' || p === ''))
+  if (
+    rest.includes('\\') ||
+    rest.split('/').some((p) => p === '..' || p === '.' || p === '')
+  )
     fail(`path outside the app root: ${name}`)
   return `${app}/${rest}`
 }
@@ -56,6 +59,8 @@ function isAssertionMessage(message: string): boolean {
 export function readVitestJson(json: unknown, app: App): RunSummary {
   if (!isRecord(json) || !Array.isArray(json.testResults))
     fail('missing testResults')
+  if (json.testResults.length === 0) fail('empty testResults')
+  let reportedFailed = 0
   const summary: RunSummary = {
     files: [],
     total: 0,
@@ -77,6 +82,7 @@ export function readVitestJson(json: unknown, app: App): RunSummary {
     )
       fail('malformed file result')
     const file = repoPath(f.name, app)
+    if (summary.files.includes(file)) fail(`duplicate file: ${file}`)
     summary.files.push(file)
     summary.passedByFile[file] = 0
     for (const a of f.assertionResults as unknown[]) {
@@ -103,8 +109,19 @@ export function readVitestJson(json: unknown, app: App): RunSummary {
           isAssertion: isAssertionMessage(message),
           message,
         })
+        reportedFailed++
       } else if (a.status === 'skipped') summary.skipped++
       else if (a.status === 'todo') summary.todo++
+      else {
+        // Unknown or non-terminal status (e.g. pending): never treat as clean.
+        summary.failed++
+        summary.failures.push({
+          file,
+          name: a.fullName,
+          isAssertion: false,
+          message: `unexpected test status: ${a.status}`,
+        })
+      }
     }
     // A file that failed without a single failed test (import error, top-level throw) is a failure too.
     const hasFailedTest = (f.assertionResults as { status?: unknown }[]).some(
@@ -121,6 +138,23 @@ export function readVitestJson(json: unknown, app: App): RunSummary {
       })
     }
   }
+  const caseCount = summary.tests.length
+  if (
+    typeof json.numTotalTests === 'number' &&
+    json.numTotalTests !== caseCount
+  )
+    fail(
+      `numTotalTests ${json.numTotalTests} disagrees with ${caseCount} tests`,
+    )
+  if (
+    typeof json.numFailedTests === 'number' &&
+    json.numFailedTests !== reportedFailed
+  )
+    fail(
+      `numFailedTests ${json.numFailedTests} disagrees with ${reportedFailed} failed tests`,
+    )
+  if (json.success === false && summary.failed === 0)
+    fail('success is false but no failure was found')
   return summary
 }
 

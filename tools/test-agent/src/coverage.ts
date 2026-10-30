@@ -21,7 +21,7 @@ export type CoverageResult = {
   pct: number | null
 }
 
-/** Rewrites container paths (`/app/src/x.ts`) to repo-relative POSIX (`backend/src/x.ts`). Files outside the app root are dropped. */
+/** Rewrites container paths (`/app/src/x.ts`) to repo-relative POSIX (`backend/src/x.ts`). Throws on any key outside the app root or with dot, empty or backslash segments. */
 export function normalizeCoverage(
   cov: CoverageMap,
   appRootInContainer: string,
@@ -30,10 +30,15 @@ export function normalizeCoverage(
   const root = appRootInContainer.replace(/\/+$/, '')
   const out: CoverageMap = {}
   for (const [key, entry] of Object.entries(cov)) {
-    if (!key.startsWith(`${root}/`)) continue
-    const rest = key.slice(root.length + 1)
-    if (rest.split('/').includes('..')) continue
+    const rest = key.startsWith(`${root}/`) ? key.slice(root.length + 1) : null
+    if (
+      rest === null ||
+      rest.includes('\\') ||
+      rest.split('/').some((p) => p === '..' || p === '.' || p === '')
+    )
+      throw new Error(`coverage key outside the app root: ${key}`)
     const path = `${app}/${rest}`
+    if (path in out) throw new Error(`duplicate coverage key: ${path}`)
     out[path] = { ...entry, path }
   }
   return out
