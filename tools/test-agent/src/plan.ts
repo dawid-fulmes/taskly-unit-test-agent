@@ -1,5 +1,5 @@
 import picomatch from 'picomatch'
-import { parseUnifiedDiff, changedLines } from './diff.ts'
+import { parseUnifiedDiff, changedLines, type FileDiff } from './diff.ts'
 import { testsRemoved } from './gates.ts'
 import { appOf, isConfigPath, isSourcePath, type Policy } from './policy.ts'
 import type { App, ManifestEntry, Mode, Plan } from './types.ts'
@@ -18,6 +18,8 @@ export interface PlanInput {
   baseSha: string
   headSha: string
   baseExcludes: Record<App, string[]>
+  /** Line counts of head files that were renamed into a source path from a non-source origin (see renamedIntoSource). */
+  newFileLineCounts?: Record<string, number>
 }
 
 /**
@@ -26,11 +28,32 @@ export interface PlanInput {
  * stripping them keeps line numbers exact while letting the strict parser accept the text.
  * Malformed flags are ignored here: the strict gates run on agent patches, not on this diff.
  */
-export function readPlanDiff(diffText: string) {
+export function readPlanDiff(diffText: string): FileDiff[] {
   const clean = diffText.replace(/[\r\u2028\u2029]/g, '')
-  return parseUnifiedDiff(clean).filter(
-    (d) => d.oldPath !== null || d.newPath !== null,
-  )
+  const diffs = parseUnifiedDiff(clean)
+  for (const d of diffs) {
+    // A duplicate path (rename plus new file at the old name, typechange) is legitimate in a PR diff.
+    if (d.malformed !== null && !DUPLICATE_PATH.test(d.malformed))
+      throw new Error(`unreadable diff section: ${d.malformed}`)
+    if (d.oldPath === null && d.newPath === null)
+      throw new Error('unreadable diff section: no paths')
+  }
+  return diffs
+}
+
+const DUPLICATE_PATH = /^path appears in more than one section/
+
+/** Destinations of renames whose origin is not a source path; the plan treats them as newly added files. */
+export function renamedIntoSource(diffText: string, policy: Policy): string[] {
+  return readPlanDiff(diffText)
+    .filter(
+      (d) =>
+        d.status === 'renamed' &&
+        d.newPath !== null &&
+        isSourcePath(policy, d.newPath) &&
+        (d.oldPath === null || !isSourcePath(policy, d.oldPath)),
+    )
+    .map((d) => d.newPath as string)
 }
 
 function excludedOnBase(path: string, app: App, globs: string[]): boolean {
@@ -47,16 +70,29 @@ export function buildPlan(input: PlanInput): Plan {
 
   const manifest: ManifestEntry[] = []
   for (const d of diffs) {
+    const isSrc = (p: string | null) => p !== null && isSourcePath(policy, p)
+    if (d.binary && (isSrc(d.newPath) || isSrc(d.oldPath)))
+      throw new Error(
+        `binary diff section on a source path: ${d.newPath ?? d.oldPath}`,
+      )
     if (d.status === 'deleted' || d.newPath === null || d.binary) continue
-    if (!isSourcePath(policy, d.newPath)) continue
+    if (!isSrc(d.newPath)) continue
     const app = appOf(d.newPath)
     if (app === null) continue
-    const lines = changedLines(d)
+    let status: ManifestEntry['status'] = d.status
+    let lines = changedLines(d)
+    if (d.status === 'renamed' && !isSrc(d.oldPath)) {
+      const count = input.newFileLineCounts?.[d.newPath]
+      if (count === undefined)
+        throw new Error(`missing line count for renamed-in file: ${d.newPath}`)
+      status = 'added'
+      lines = Array.from({ length: count }, (_, i) => i + 1)
+    }
     if (lines.length === 0) continue
     manifest.push({
       path: d.newPath,
       app,
-      status: d.status,
+      status,
       changedLines: lines,
       excludedOnBase: excludedOnBase(d.newPath, app, input.baseExcludes[app]),
     })

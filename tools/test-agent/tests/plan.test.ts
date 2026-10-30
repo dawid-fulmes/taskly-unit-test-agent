@@ -1,4 +1,10 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  renameSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -119,6 +125,48 @@ describe('buildPlan', () => {
   })
 })
 
+describe('buildPlan fail-closed', () => {
+  it('throws on a binary section for a source path', () => {
+    const bin =
+      'diff --git a/backend/src/a.ts b/backend/src/a.ts\nindex 1..2 100644\nBinary files a/backend/src/a.ts and b/backend/src/a.ts differ\n'
+    expect(() => buildPlan(input(bin))).toThrow(/binary/)
+  })
+  it('throws on a truncated source hunk', () => {
+    const bad = `diff --git a/backend/src/a.ts b/backend/src/a.ts\nindex 1..2 100644\n--- a/backend/src/a.ts\n+++ b/backend/src/a.ts\n@@ -1,0 +2,3 @@\n+x\n`
+    expect(() => buildPlan(input(bad))).toThrow()
+  })
+  it('throws on garbage before the first section', () => {
+    expect(() => buildPlan(input('junk\n' + modified('README.md')))).toThrow()
+  })
+  it('handles filenames with spaces, quotes and unicode', () => {
+    const p = buildPlan(
+      input(
+        modified('backend/src/my file.ts') +
+          modified('"backend/src/caf\\303\\251.ts"'.slice(1, -1)).replace(
+            /backend\/src\/caf\\303\\251\.ts/g,
+            'backend/src/caf\\303\\251.ts',
+          ),
+      ),
+    )
+    expect(p.manifest.map((m) => m.path)).toContain('backend/src/my file.ts')
+  })
+  it('renames into a source path become added with all lines', () => {
+    const r = `diff --git a/docs/x.ts b/backend/src/x.ts\nsimilarity index 100%\nrename from docs/x.ts\nrename to backend/src/x.ts\n`
+    expect(() => buildPlan(input(r))).toThrow(/line count/)
+    const p = buildPlan(
+      input(r, { newFileLineCounts: { 'backend/src/x.ts': 3 } }),
+    )
+    expect(p.manifest[0]).toMatchObject({
+      status: 'added',
+      changedLines: [1, 2, 3],
+    })
+  })
+  it('pure rename within source is skipped', () => {
+    const r = `diff --git a/backend/src/x.ts b/backend/src/y.ts\nsimilarity index 100%\nrename from backend/src/x.ts\nrename to backend/src/y.ts\n`
+    expect(buildPlan(input(r)).earlyOutcome).toBe('nothing-to-test')
+  })
+})
+
 describe('plan CLI', () => {
   it('writes plan.json from a real git repo', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'plan-cli-'))
@@ -179,5 +227,117 @@ describe('plan CLI', () => {
     expect(plan.manifest[0].changedLines).toEqual([3])
     const bad = await exec('node', [cli, '--mode', 'pr'])
     expect(bad.code).not.toBe(0)
+  })
+
+  async function repo(
+    setup: (dir: string) => void,
+    change: (dir: string) => void,
+  ) {
+    const dir = mkdtempSync(join(tmpdir(), 'plan-cli-'))
+    const git = (...a: string[]) =>
+      exec('git', ['-c', 'user.email=a@b.c', '-c', 'user.name=n', ...a], {
+        cwd: dir,
+      })
+    await git('init', '-q', '-b', 'main')
+    setup(dir)
+    await git('add', '-A')
+    await git('commit', '-qm', 'base')
+    const base = (await git('rev-parse', 'HEAD')).stdout.trim()
+    change(dir)
+    await git('add', '-A')
+    await git('commit', '-qm', 'head')
+    const head = (await git('rev-parse', 'HEAD')).stdout.trim()
+    const trusted = join(dir, '..', `${dir.split('/').pop()}-trusted`)
+    mkdirSync(join(trusted, 'backend'), { recursive: true })
+    mkdirSync(join(trusted, 'frontend'), { recursive: true })
+    const cfg = "export default { test: { coverage: { exclude: ['x/**'] } } }"
+    writeFileSync(join(trusted, 'backend/vitest.config.ts'), cfg)
+    writeFileSync(join(trusted, 'frontend/vite.config.ts'), cfg)
+    const prJson = join(trusted, 'pr.json')
+    writeFileSync(
+      prJson,
+      JSON.stringify({
+        number: 3,
+        title: 't',
+        body: 'b',
+        draft: false,
+        labels: [],
+      }),
+    )
+    const out = join(trusted, 'plan.json')
+    const cli = new URL('../src/cli/plan.ts', import.meta.url).pathname
+    const r = await exec('node', [
+      cli,
+      '--mode',
+      'pr',
+      '--base',
+      base,
+      '--head',
+      head,
+      '--pr-json',
+      prJson,
+      '--trusted',
+      trusted,
+      '--work',
+      dir,
+      '--out',
+      out,
+    ])
+    return { r, out }
+  }
+
+  it('binary-flagged source (-diff attribute) still yields a manifest entry', async () => {
+    const { r, out } = await repo(
+      (d) => {
+        mkdirSync(join(d, 'backend/src'), { recursive: true })
+        writeFileSync(join(d, 'backend/src/a.ts'), 'a\n')
+      },
+      (d) => {
+        writeFileSync(join(d, '.gitattributes'), '*.ts -diff\n')
+        writeFileSync(join(d, 'backend/src/a.ts'), 'a\nb\n')
+      },
+    )
+    expect(r.stderr).toBe('')
+    expect(
+      JSON.parse(readFileSync(out, 'utf8')).manifest[0].changedLines,
+    ).toEqual([2])
+  })
+  it('NUL byte in source still yields a manifest entry', async () => {
+    const { r, out } = await repo(
+      (d) => {
+        mkdirSync(join(d, 'backend/src'), { recursive: true })
+        writeFileSync(join(d, 'backend/src/a.ts'), 'a\n')
+      },
+      (d) => writeFileSync(join(d, 'backend/src/a.ts'), 'a\n\0b\n'),
+    )
+    expect(r.code).toBe(0)
+    expect(
+      JSON.parse(readFileSync(out, 'utf8')).manifest[0].changedLines,
+    ).toEqual([2])
+  })
+  it('rename into source and odd filenames work end to end', async () => {
+    const { r, out } = await repo(
+      (d) => {
+        mkdirSync(join(d, 'docs'), { recursive: true })
+        mkdirSync(join(d, 'backend/src'), { recursive: true })
+        writeFileSync(join(d, 'docs/x.ts'), '1\n2\n3\n')
+      },
+      (d) => {
+        renameSync(join(d, 'docs/x.ts'), join(d, 'backend/src/x.ts'))
+        writeFileSync(join(d, 'backend/src/we ird "q" caf\u00e9.ts'), 'z\n')
+      },
+    )
+    expect(r.stderr).toBe('')
+    const m = JSON.parse(readFileSync(out, 'utf8')).manifest
+    expect(m).toHaveLength(2)
+    expect(
+      m.find((e: { path: string }) => e.path === 'backend/src/x.ts'),
+    ).toMatchObject({
+      status: 'added',
+      changedLines: [1, 2, 3],
+    })
+    expect(m.map((e: { path: string }) => e.path)).toContain(
+      'backend/src/we ird "q" caf\u00e9.ts',
+    )
   })
 })

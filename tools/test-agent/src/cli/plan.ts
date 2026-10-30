@@ -6,7 +6,7 @@ import { parseArgs } from 'node:util'
 try {
   const { exec } = await import('../exec.ts')
   const { loadPolicy } = await import('../policy.ts')
-  const { buildPlan } = await import('../plan.ts')
+  const { buildPlan, renamedIntoSource } = await import('../plan.ts')
   const { readCoverageExcludes } = await import('../config-excludes.ts')
 
   const { values } = parseArgs({
@@ -34,7 +34,8 @@ try {
 
   const git = async (...args: string[]) => {
     const r = await exec('git', args, { cwd: work })
-    if (r.code !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr}`)
+    if (r.code !== 0 || r.timedOut)
+      throw new Error(`git ${args[0]} failed (code ${r.code}): ${r.stderr}`)
     return r.stdout
   }
   const mergeBase = (await git('merge-base', base, head)).trim()
@@ -44,6 +45,10 @@ try {
     '--no-ext-diff',
     '--no-textconv',
     '--find-renames',
+    '--text',
+    '--no-color',
+    '--src-prefix=a/',
+    '--dst-prefix=b/',
     mergeBase,
     head,
   )
@@ -54,13 +59,23 @@ try {
     typeof pr.title !== 'string' ||
     typeof pr.body !== 'string' ||
     typeof pr.draft !== 'boolean' ||
-    !Array.isArray(pr.labels)
+    !Array.isArray(pr.labels) ||
+    !pr.labels.every((l: unknown) => typeof l === 'string')
   )
     throw new Error('invalid --pr-json')
 
+  const policy = loadPolicy()
+  const newFileLineCounts: Record<string, number> = {}
+  for (const path of renamedIntoSource(diffText, policy)) {
+    const text = await git('show', `${head}:${path}`)
+    newFileLineCounts[path] =
+      text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0)
+  }
+
   const plan = buildPlan({
+    newFileLineCounts,
     mode: 'pr',
-    policy: loadPolicy(),
+    policy,
     diffText,
     pr,
     baseSha: base,
