@@ -1,4 +1,6 @@
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
+import { join, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { changedLines, parseUnifiedDiff } from '../src/diff.ts'
 import { checkPatch, stripEvidence, testsRemoved } from '../src/gates.ts'
@@ -231,9 +233,9 @@ describe('checkPatch hostile parser shapes', () => {
     expect(rules(added(line))).toEqual(['weakening'])
   })
 
-  it('does not flag comparisons or arrow params', () => {
+  it('does not flag comparisons; runner-named arrow params are rejected', () => {
     expect(rules(added('if (a === b) {}'))).toEqual([])
-    expect(rules(added('xs.map(test => test)'))).toEqual([])
+    expect(rules(added('xs.map(test => test)'))).toEqual(['weakening'])
   })
 
   it('catches skip aliasing and cross-line modifiers', () => {
@@ -241,9 +243,9 @@ describe('checkPatch hostile parser shapes', () => {
     expect(rules(added("describe.skipIf(x)('a', () => {})"))).toEqual([
       'forbidden-call',
     ])
-    expect(rules(added("it['only']('a', () => {})"))).toEqual([
+    expect(rules(added("it['only']('a', () => {})"))).toContain(
       'forbidden-call',
-    ])
+    )
   })
 })
 
@@ -379,9 +381,9 @@ describe('checkPatch round 3 bypasses', () => {
   })
 
   it('does not flag comparisons, object keys, plain imports or call exemptions', () => {
+    for (const l of ['if (a === it) {}', 'if (a !== test) {}'])
+      expect(rules(added(l))).toEqual(['weakening'])
     for (const l of [
-      'if (a === it) {}',
-      'if (a !== test) {}',
       'if (a <= b || a >= c) {}',
       'const cases = [{ test: 1, it: 2 }]',
       'const f = vi.fn()',
@@ -485,9 +487,155 @@ describe('checkPatch round 4 bypasses', () => {
       "it('handles a, b and c', () => {})",
       "test('returns 404, then retries', () => {})",
       "const s = 'extend'",
-      'expect(obj.extend).toBeDefined()',
     ])
       expect(rules(added(l))).toEqual([])
+    expect(rules(added('expect(obj.extend).toBeDefined()'))).toEqual([
+      'weakening',
+    ])
+  })
+})
+
+describe('checkPatch round 5: blanked literals and assertion overrides', () => {
+  const added = (text: string, path = 'frontend/src/a.test.tsx') => {
+    const lines = ['expect(1);', ...text.split('\n')]
+    return `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${lines.length} @@\n${lines.map((l) => '+' + l).join('\n')}\n`
+  }
+  const mod = (text: string) => {
+    const lines = text.split('\n')
+    return `diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts\n--- a/backend/tests/a.test.ts\n+++ b/backend/tests/a.test.ts\n@@ -3,0 +4,${lines.length} @@\n${lines.map((l) => '+' + l).join('\n')}\n`
+  }
+
+  it('t01: importing chai and overwriting an assertion is rejected', () => {
+    expect(rules(fixture('t01_chai_mod'))).toEqual(['weakening', 'weakening'])
+  })
+
+  it.each([
+    "(expect as any).extend({ toBe: () => ({ pass: true, message: () => '' }) })",
+    "(expect!).extend({ toBe: () => ({ pass: true, message: () => '' }) })",
+    "chai.Assertion.overwriteMethod('toBe', () => function () {})",
+    "chai.use((c) => c.Assertion.overwriteMethod('toEqual', () => function () {}))",
+    "import { chai } from 'vitest'",
+    'expect.addEqualityTesters([() => true])',
+    'expect.setState({ assertionCalls: 1 })',
+  ])('modified files reject %j', (line) => {
+    expect(rules(mod(line))).toContain('weakening')
+  })
+
+  it.each([
+    "expect /**/ .extend({ toBe: () => ({ pass: true, message: () => '' }) })",
+    'expect\n  .extend({})',
+    ";((t: any) => t[['fa', 'ils'].join('')])(it as any)('z', () => { expect(1).toBe(2) })",
+    ";((t: any) => t[['sk', 'ip'].join('')])(it!)('z', () => { expect(1).toBe(2) })",
+    'wrap(/**/it)',
+    'wrap(a,\n  it\n)',
+    'const f = (a: unknown) =>\n  a ? it : 0',
+    'const v = vi as any',
+    'const e = expect<any>',
+    'const x = `${it}`',
+    "globalThis['expect']['extend']({})",
+    "const m = await vi.importActual('vitest'); m['chai']",
+    "x['fa' + 'ils']",
+    'x[a + `ils`]',
+    "it //c\n.skip('x', () => {})",
+    "render(<p>Don't</p>); const s = it; '",
+    "const r = /'/; const s = it; //'",
+    "import { it } from 'node:test'",
+    "import test from 'node:test'",
+    'Assertion.addMethod("x", () => {})',
+    '<<<<<<< HEAD\nconst s = 1\n=======\n>>>>>>> x',
+    'const t = `unterminated',
+  ])('new files reject %j', (text) => {
+    expect(check(added(text)).ok).toBe(false)
+  })
+
+  it.each([
+    "const db = createDatabase('postgresql://test:test@localhost:5432/test')",
+    "const email = 'test@example.com'",
+    "const todo = { id: 1, title: 'A test todo', done: false }",
+    "const err = new Error('test error')",
+    "const label = 'Delete it'",
+    'const re = /test/i',
+    "expect(screen.getByText('Buy milk (test)')).toBeInTheDocument()",
+    "const names = ['a' + suffix]",
+    'const mocked = vi.mocked(request)',
+    'const mock = vi.mocked(useNotice).mockReturnValue({ notice: null, show: vi.fn() })',
+    'const onSave = vi.fn<(t: Todo) => void>()',
+    'const timer = vi.advanceTimersByTime(100)',
+    'const now = vi.getMockedSystemTime()',
+    'const n = expect<number>(1)',
+    "await user.type(input, 'test')",
+    'const url = `/api/todos?filter=${filter}`',
+    'expect(a).toEqual(b) // test it, then extend it',
+    '/* it, test and chai */ expect(1).toBe(1)',
+    "render(<p>\n  Don't do it\n</p>)",
+    'const o = {\n  test: 1,\n  it: 2,\n}',
+    "import {\n  describe,\n  expect,\n  it,\n  vi,\n} from 'vitest'",
+    "it\n  .each([['all', 3]])('filters %s', (f, n) => { expect(n).toBe(3) })",
+    "screen.getAllByRole('row')[1]",
+    'const c = mock.calls[0]![0]',
+    "type T = Todo['title']",
+    "const v = obj['test']",
+    "it('x', () => {\n  expect(fmt('it, test')).toBe('a')\n})",
+  ])('new files allow %j', (text) => {
+    expect(check(added(text)).violations).toEqual([])
+  })
+
+  it.each([
+    "it('adds', () => {\n  expect(1).toBe(1)\n})",
+    "describe('more', () => {\n  it('x', () => {\n    expect(fmt('it')).toBe('a')\n  })\n})",
+    "import { vi } from 'vitest'",
+    'const f = vi.fn()',
+  ])('modified files allow %j', (text) => {
+    expect(check(mod(text)).violations).toEqual([])
+  })
+
+  it.each([
+    '(vi.mock)("x")',
+    'vi.doUnmock("x")',
+    'const z = `',
+    "it('x', () => {\n  expect(1).toBe(1)\n",
+    "it('extend the deadline', () => { expect(1).toBe(1) })",
+  ])('modified files reject %j', (text) => {
+    expect(rules(mod(text))).toContain('weakening')
+  })
+
+  it('reports a parse failure as weakening with the parser message', () => {
+    const v = check(added('const = 1')).violations
+    expect(v).toHaveLength(1)
+    expect(v[0]!.rule).toBe('weakening')
+    expect(v[0]!.detail).toContain('does not parse')
+  })
+
+  it('reports a non-vitest import of a test global on its own line', () => {
+    const v = check(
+      added("const a = 1\nimport { it } from 'node:test'"),
+    ).violations
+    expect(v.map((x) => x.detail.split(':')[0])).toEqual(['line 3'])
+  })
+
+  it('no-expect ignores expect( inside comments and strings', () => {
+    const t = `diff --git a/backend/tests/n.test.ts b/backend/tests/n.test.ts\nnew file mode 100644\n--- /dev/null\n+++ b/backend/tests/n.test.ts\n@@ -0,0 +1,2 @@\n+// expect(1)\n+const s = 'expect(1)'\n`
+    expect(rules(t)).toEqual(['no-expect'])
+  })
+})
+
+describe('checkPatch on the repository test files', () => {
+  const root = fileURLToPath(new URL('../../../', import.meta.url))
+  const files = ['backend/tests', 'frontend/src'].flatMap((dir) =>
+    readdirSync(join(root, dir), { recursive: true, encoding: 'utf8' })
+      .filter((f) => /\.test\.tsx?$/.test(f) && !f.includes('node_modules'))
+      .map((f) => `${dir}/${f.split(sep).join('/')}`),
+  )
+
+  it('finds the existing test files', () => {
+    expect(files.length).toBeGreaterThanOrEqual(18)
+  })
+
+  it.each(files)('%s passes as a newly added file', (path) => {
+    const lines = readFileSync(join(root, path), 'utf8').split('\n')
+    if (lines.at(-1) === '') lines.pop()
+    const diff = `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${lines.length} @@\n${lines.map((l) => '+' + l).join('\n')}\n`
+    expect(check(diff)).toEqual({ ok: true, violations: [] })
   })
 })
 
