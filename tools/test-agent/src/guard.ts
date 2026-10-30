@@ -124,6 +124,52 @@ function pieceProblem(policy: Policy, piece: string): string | null {
     }
   }
   if (isSecretPath(policy, piece)) return 'pattern is a secret path'
+  return extensionProblem(piece)
+}
+
+/**
+ * Allowlist rule: a piece may only match files with a known code extension. Random-suffix
+ * probes catch dotfiles such as `.env.<anything>` without listing real env names. Matching is
+ * case-sensitive (Linux CI). Bare trailing `*` / `**` pieces are denied because they can
+ * match dotfiles.
+ */
+const PROBES = ['.env.zq9', 'a/.env.zq9', '.envrc', '.npmrc', '.netrc']
+const ALLOWED_EXTENSIONS = new Set([
+  'ts',
+  'tsx',
+  'js',
+  'jsx',
+  'mjs',
+  'cjs',
+  'json',
+  'md',
+  'css',
+  'html',
+  'yml',
+  'yaml',
+  'prisma',
+  'sql',
+])
+
+function extensionProblem(piece: string): string | null {
+  const candidates = piece.includes('/') ? [piece] : [piece, `**/${piece}`]
+  for (const candidate of candidates) {
+    for (const probe of PROBES) {
+      if (picomatch.isMatch(probe, candidate, { dot: true })) {
+        return `pattern can match dotfile ${probe}`
+      }
+    }
+  }
+  const last = piece.slice(piece.lastIndexOf('/') + 1)
+  const dot = last.lastIndexOf('.')
+  if (dot === -1) return 'pattern has no file extension'
+  let extension = last.slice(dot + 1)
+  if (extension.startsWith('{') && extension.endsWith('}'))
+    extension = extension.slice(1, -1)
+  for (const alternative of extension.split(',')) {
+    if (!ALLOWED_EXTENSIONS.has(alternative))
+      return `extension not allowed: ${alternative}`
+  }
   return null
 }
 
