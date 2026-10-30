@@ -13,6 +13,8 @@ export interface StatusEntry {
 const GIT_ENV = (): Record<string, string> => ({
   PATH: process.env.PATH ?? '',
   HOME: process.env.HOME ?? '',
+  // Only the repository's own config: no user (~/.gitconfig) or system config.
+  GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_CONFIG_NOSYSTEM: '1',
   GIT_TERMINAL_PROMPT: '0',
 })

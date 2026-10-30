@@ -690,6 +690,63 @@ describe('checkPatch: test-context result tampering', () => {
     expect(weakening(mod(text))).not.toEqual([])
   })
 
+  // Fix round 1: the task object and generic object mutation.
+  const taskTampering = [
+    "it('x', ({ task }) => { expect.soft(f()).toBe(1); Object.assign(task.result!, { state: 'pass' }) })",
+    "Object.defineProperty(t, 'result', { value: { state: 'pass' } })",
+    'delete t.result',
+    'task.result.errors.length = 0',
+    // Leading `;` as the formatter writes it; without it ASI joins the previous line.
+    ';[t.fails] = [true]',
+    "it('x', ({ task: t }) => { expect(t).toBeTruthy() })",
+    "it('x', ({ a, task }) => { expect(a).toBe(1) })",
+    "it('x', (ctx) => { expect(ctx.task).toBeTruthy() })",
+    "it('x', (ctx) => { expect(ctx?.task).toBeTruthy() })",
+    "it('x', (ctx) => { const { task } = ctx; expect(task).toBeTruthy() })",
+    "const k = ctx['task']",
+    'Object.defineProperties(t, {})',
+    'Object.setPrototypeOf(t, null)',
+    'Reflect.set(t, "fails", true)',
+    'delete (t.result)',
+    "delete t['result']",
+    '({ a: t.fails } = { a: true })',
+    'for (t.mode of modes) expect(1).toBe(1)',
+  ]
+
+  it.each(taskTampering)('new test files reject %j', (text) => {
+    expect(weakening(added(text))).not.toEqual([])
+  })
+
+  it.each(taskTampering)('evidence files reject %j', (text) => {
+    expect(
+      weakening(added(text, 'backend/tests/__evidence__/a.test.ts')),
+    ).not.toEqual([])
+  })
+
+  it.each(taskTampering)('modified test files reject %j', (text) => {
+    expect(weakening(mod(text))).not.toEqual([])
+  })
+
+  it('modified test files reject a bare destructuring assignment to a member', () => {
+    expect(weakening(mod('[t.fails] = [true]'))).not.toEqual([])
+  })
+
+  it.each([
+    'expect(await repository.delete(1)).toBe(true)',
+    'const repo = { delete: vi.fn(), get: vi.fn() }',
+    "expect(screen.getByRole('dialog', { name: 'Delete task?' })).toBeVisible()",
+    'const { a, b } = obj',
+    'const [x, y] = pair',
+    'let p = 1\nlet q = 2\n;[p, q] = [q, p]',
+    "it('x', ({ ...ctx }) => { expect(ctx).toBeTruthy() })",
+    "const todo = { task: 'buy milk' }",
+    'expect(Object.keys(o)).toEqual([])',
+    'for (const m of modes) expect(m).toBeTruthy()',
+    "const taskList = 'x'",
+  ])('new test files still allow %j', (text) => {
+    expect(check(added(text)).violations).toEqual([])
+  })
+
   it.each([
     'expect(store.state).toBe(1)',
     'expect(res.errors).toEqual([])',

@@ -178,6 +178,20 @@ async function gateApplied(
 }
 
 /**
+ * Sandboxes, results and applied patch files must never land in the work tree: they would be
+ * copied into later sandboxes and show up in the R6 status. Fail closed.
+ */
+function assertOutside(workDir: string, runDir: string): void {
+  const rel = path.relative(path.resolve(workDir), path.resolve(runDir))
+  const outside =
+    rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)
+  if (!outside)
+    throw new Error(
+      `run dir must be outside the work dir (work ${workDir}, run ${runDir})`,
+    )
+}
+
+/**
  * The `verify` job (spec §7): independently re-checks the agent's patch in sandboxed containers
  * and computes the verdict outside them. Throws only on internal failures.
  */
@@ -187,6 +201,7 @@ export async function runVerify(
 ): Promise<Verdict> {
   const { fs, exec } = deps
   const { plan, workDir, runDir } = args
+  assertOutside(workDir, runDir)
   const log = deps.log ?? (() => {})
   // Trusted policy: from the trusted checkout, never from the work dir.
   const policy = loadPolicy(

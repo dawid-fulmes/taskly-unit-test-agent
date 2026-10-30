@@ -306,6 +306,37 @@ describe('runVerify rejections and failures', () => {
     )
   })
 
+  it('typecheck exit 2 with a TS diagnostic is a type error (verification-failed)', async () => {
+    w.onDocker = async (run, defaults) =>
+      run.step === 'after-backend-typecheck'
+        ? {
+            code: 2,
+            stdout:
+              'tests/a.test.ts(2,36): error TS2835: Relative import paths need explicit file extensions.',
+          }
+        : defaults()
+    const v = await verify()
+    expect(v.outcome).toBe('verification-failed')
+    expect(v.reasons).toContain('backend: typecheck fails after the patch')
+  })
+
+  it.each([1, 2])(
+    'typecheck exit %i without a TS diagnostic is unusable (pipeline-error)',
+    async (code) => {
+      w.onDocker = async (run, defaults) =>
+        run.step === 'baseline-backend-typecheck'
+          ? { code, stdout: 'npm error could not determine executable to run' }
+          : defaults()
+      const v = await verify()
+      expect(v.outcome).toBe('pipeline-error')
+      expect(v.reasons.join('\n')).toMatch(
+        new RegExp(
+          `baseline backend typecheck unusable: exit ${code} without a TS diagnostic`,
+        ),
+      )
+    },
+  )
+
   it('typecheck that cannot run (docker error) is a pipeline-error, not baseline-failing', async () => {
     w.onDocker = async (run, defaults) =>
       run.step === 'baseline-frontend-typecheck' ? { code: 125 } : defaults()
@@ -349,6 +380,39 @@ describe('runVerify rejections and failures', () => {
     expect(v.outcome).toBe('pipeline-error')
     expect(v.reasons.join('\n')).toMatch(/not the analysed head/)
     expect(w.docker).toEqual([])
+  })
+})
+
+describe('runVerify environment hardening', () => {
+  it.each([
+    ['inside', (work: string) => path.join(work, 'run')],
+    ['equal to', (work: string) => work],
+    ['inside (unnormalised)', (work: string) => `${work}/x/../run`],
+  ])('refuses a run dir %s the work dir', async (_, runDir) => {
+    w.args.runDir = runDir(w.workDir)
+    await expect(verify()).rejects.toThrow(
+      /run dir must be outside the work dir/,
+    )
+    expect(w.calls).toEqual([])
+  })
+
+  it('accepts a sibling whose name starts with the work dir name', async () => {
+    w.args.runDir = `${w.workDir}-run`
+    const v = await verify()
+    expect(v.outcome).toBe('tests-added')
+    await fs.rm(w.args.runDir, { recursive: true, force: true })
+  })
+
+  it('runs git without user or system config', async () => {
+    await verify()
+    const gitCalls = w.calls.filter((c) => c.cmd === 'git')
+    expect(gitCalls.length).toBeGreaterThan(0)
+    for (const c of gitCalls)
+      expect(c.opts?.env).toMatchObject({
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_NOSYSTEM: '1',
+        HOME: process.env.HOME ?? '',
+      })
   })
 })
 

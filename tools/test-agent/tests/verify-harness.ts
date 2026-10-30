@@ -34,6 +34,8 @@ export interface DockerRun {
 type Json = Record<string, unknown>
 export interface DockerResult {
   code: number
+  /** Container stdout (default `out of <step>`). */
+  stdout?: string
   json?: Json | null
   coverage?: Json | null
 }
@@ -359,7 +361,7 @@ export async function makeWorld(): Promise<World> {
     }
     return {
       code: r.code,
-      stdout: `out of ${run.step}`,
+      stdout: r.stdout ?? `out of ${run.step}`,
       stderr: `err of ${run.step}`,
       timedOut: false,
     }

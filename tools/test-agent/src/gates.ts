@@ -61,6 +61,60 @@ interface Lexed {
   errors: { offset: number; message: string }[]
   /** Offsets of block comments. */
   blockComments: number[]
+  /** Syntax-level test-object tampering found in the AST (see taskTampering). */
+  tamper: { offset: number; why: string }[]
+}
+
+const hasMemberTarget = (node: ts.Node): boolean =>
+  ts.isPropertyAccessExpression(node) ||
+  ts.isElementAccessExpression(node) ||
+  (ts.forEachChild(node, (c) => hasMemberTarget(c) || undefined) ?? false)
+
+/**
+ * Shapes that regexes on blanked text cannot see reliably: destructuring the test context's
+ * `task` (`({ task }) =>`, `({ task: t })`, `const { task } = ctx`), and writes to members
+ * through destructuring assignment (`[t.fails] = [true]`) or a for-in/of target (`for (t.mode of …)`).
+ */
+function taskTampering(sf: ts.SourceFile): Lexed['tamper'] {
+  const out: Lexed['tamper'] = []
+  const visit = (node: ts.Node): void => {
+    // The parser runs without parent pointers: inspect patterns from the pattern node.
+    if (ts.isObjectBindingPattern(node))
+      for (const el of node.elements) {
+        const key = el.propertyName ?? el.name
+        if (
+          (ts.isIdentifier(key) || ts.isStringLiteral(key)) &&
+          key.text === 'task'
+        )
+          out.push({
+            offset: el.getStart(sf),
+            why: 'destructures the test task object',
+          })
+      }
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === K.EqualsToken &&
+      (ts.isArrayLiteralExpression(node.left) ||
+        ts.isObjectLiteralExpression(node.left)) &&
+      hasMemberTarget(node.left)
+    )
+      out.push({
+        offset: node.getStart(sf),
+        why: 'destructuring assignment to a member',
+      })
+    if (
+      (ts.isForOfStatement(node) || ts.isForInStatement(node)) &&
+      !ts.isVariableDeclarationList(node.initializer) &&
+      hasMemberTarget(node.initializer)
+    )
+      out.push({
+        offset: node.initializer.getStart(sf),
+        why: 'for-in/of loop assigns to a member',
+      })
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return out
 }
 
 /**
@@ -142,7 +196,12 @@ function lex(text: string, tsx: boolean): Lexed {
         message: ts.flattenDiagnosticMessageText(d.messageText, ' '),
       }))
     : [{ offset: 0, message: 'parser diagnostics unavailable' }]
-  return { code: out.join(''), errors, blockComments }
+  return {
+    code: out.join(''),
+    errors,
+    blockComments,
+    tamper: taskTampering(sf),
+  }
 }
 
 // Whole import statements only; anything else sharing the line is kept and checked.
@@ -171,7 +230,7 @@ const SENSITIVE_KEY =
   /^(?:skip|only|todo|fails|skipIf|runIf|concurrent|sequential|extend|addSnapshotSerializer|addEqualityTesters|chai|Assertion|overwrite\w*|add(?:Method|Property|ChainableMethod)|setState)$/
 // Test-context result members (task.result, t.fails, file.tasks, ...) and result hooks.
 const RESULT_KEY =
-  /^(?:state|errors|result|mode|tasks|onTestFailed|onTestFinished)$/
+  /^(?:state|errors|result|mode|tasks|task|onTestFailed|onTestFinished|assign|defineProperty|defineProperties|setPrototypeOf)$/
 const NON_MEMBER_KEYWORDS =
   /(?:^|[^\w$.])(?:return|of|in|typeof|case|yield|await|else|do|void|delete|throw|instanceof|new|extends)$/
 
@@ -225,14 +284,21 @@ interface FileContext {
   lineStart: number[]
   errors: Lexed['errors']
   blockComments: number[]
+  tamper: Lexed['tamper']
 }
 
 function lexFile(text: string, tsx: boolean): FileContext {
-  const { code, errors, blockComments } = lex(text, tsx)
+  const { code, errors, blockComments, tamper } = lex(text, tsx)
   const lineStart = [0]
   for (let i = 0; i < text.length; i++)
     if (text[i] === '\n') lineStart.push(i + 1)
-  return { codeLines: code.split('\n'), lineStart, errors, blockComments }
+  return {
+    codeLines: code.split('\n'),
+    lineStart,
+    errors,
+    blockComments,
+    tamper,
+  }
 }
 
 const isTsx = (path: string | null) => /\.tsx$/.test(path ?? '')
@@ -257,6 +323,9 @@ function lexUnit(
     blockComments: ctx.blockComments
       .filter((o) => o >= base && o < base + code.length)
       .map((o) => o - base),
+    tamper: ctx.tamper
+      .filter((t) => t.offset >= base && t.offset < base + code.length)
+      .map((t) => ({ offset: t.offset - base, why: t.why })),
   }
 }
 
@@ -271,7 +340,7 @@ function buildUnits(d: FileDiff, ctx?: FileContext): Unit[] {
   }
   return groups.map((lines) => {
     const raw = lines.map((l) => l.text).join('\n')
-    const { code, errors, blockComments } = lexUnit(
+    const { code, errors, blockComments, tamper } = lexUnit(
       lines,
       raw,
       tsx,
@@ -284,6 +353,7 @@ function buildUnits(d: FileDiff, ctx?: FileContext): Unit[] {
     if (d.status === 'modified')
       for (const offset of blockComments)
         weakening.push({ offset, why: 'block comment in existing test file' })
+    weakening.push(...tamper)
     const computed = computedMembers(code, raw)
     for (const c of computed)
       if (c.weakening) weakening.push({ offset: c.offset, why: c.why })
@@ -380,6 +450,14 @@ const RESULT_HOOK = /(?<![\w$])(?:onTestFailed|onTestFinished)(?![\w$])/
 const RESULT_ASSIGN =
   /\.(?:state|errors|result|fails|mode)(?![\w$])\s*(?:!\s+)?(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])/
 const TASK_TREE = /\.tasks(?![\w$])/
+// Fix round 1: any access to the test task, generic object mutation, and the delete operator.
+const TASK_MEMBER = /\.task(?![\w$])/
+// `task.result…`, `task!.x`, `task?.x`, `task[…]`: the task object under its usual name.
+const TASK_OBJECT = /(?<![\w$.])task\s*(?:!\s*)?(?:\?\.|\.|\[)/
+const OBJECT_MUTATION =
+  /(?<![\w$.])Object\.(?:assign|defineProperty|defineProperties|setPrototypeOf)(?![\w$])/
+// The operator, not `.delete(` calls or a `delete:` object key.
+const DELETE_OPERATOR = /(?<![\w$.])delete(?![\w$])(?!\s*:)/
 const IMPORT_AS = /\bimport\s*(?:type\s*)?(?:\{[^}]*\bas\s+|\*\s*as\s+)/
 const VI_MOCKING =
   /(?<![\w$])vi\.(?:mock|doMock|unmock|doUnmock|stubGlobal|stubEnv)(?![\w$])/
@@ -443,6 +521,11 @@ function weakeningReasons(
     out.push('test result hook (onTestFailed/onTestFinished)')
   if (RESULT_ASSIGN.test(n)) out.push('assignment to a test result member')
   if (TASK_TREE.test(n)) out.push('access to the test task tree (.tasks)')
+  if (TASK_MEMBER.test(n) || TASK_OBJECT.test(n))
+    out.push('access to the test task object (.task)')
+  if (OBJECT_MUTATION.test(n))
+    out.push('Object.assign/defineProperty/setPrototypeOf not allowed')
+  if (DELETE_OPERATOR.test(n)) out.push('delete operator not allowed')
   if (modified) {
     for (const [re, why] of MODIFIED_ONLY) if (re.test(b)) out.push(why)
     const r = normalise(raw)

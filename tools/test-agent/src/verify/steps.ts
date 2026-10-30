@@ -39,13 +39,17 @@ export function suiteOf(run: StepRun, parsed: ParsedRun): Suite {
 export const passed = (s: Suite): s is Extract<Suite, { ok: true }> =>
   s.ok && s.summary.failed === 0
 
-/** tsc exits 1 or 2 on type errors; any other non-zero exit is a broken step, not a result. */
+/**
+ * tsc exits 1 or 2 on type errors, and then prints `TS<code>` diagnostics. Exit 1/2 without one
+ * (npx failing, a crash) and any other non-zero exit are broken steps, not results.
+ */
 export function typecheckOf(run: StepRun): boolean | { error: string } {
-  const { code, timedOut } = run.result
+  const { code, timedOut, stdout, stderr } = run.result
   if (timedOut) return { error: 'timed out' }
   if (code === 0) return true
-  if (code === 1 || code === 2) return false
-  return { error: `exit ${code}` }
+  if (code !== 1 && code !== 2) return { error: `exit ${code}` }
+  if (/\bTS\d+\b/.test(`${stdout}\n${stderr}`)) return false
+  return { error: `exit ${code} without a TS diagnostic` }
 }
 
 /** The guard's runner argument rules (safe characters, no options, no traversal) for a repo path. */
