@@ -765,6 +765,121 @@ describe('checkPatch: test-context result tampering', () => {
   })
 })
 
+describe('checkPatch: test-context reflection paths (fix round 2)', () => {
+  const lines = (text: string) => ['expect(1)', ...text.split('\n')]
+  const added = (text: string, path = 'backend/tests/a.test.ts') => {
+    const l = lines(text)
+    return `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${l.length} @@\n${l.map((x) => '+' + x).join('\n')}\n`
+  }
+  const mod = (text: string) => {
+    const l = text.split('\n')
+    return `diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts\n--- a/backend/tests/a.test.ts\n+++ b/backend/tests/a.test.ts\n@@ -3,0 +4,${l.length} @@\n${l.map((x) => '+' + x).join('\n')}\n`
+  }
+  const weakening = (diff: string) =>
+    check(diff).violations.filter((v) => v.rule === 'weakening')
+  const whole = (body: string, path = 'backend/tests/a.test.ts') => {
+    const l = body.split('\n')
+    return `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${l.length} @@\n${l.map((x) => '+' + x).join('\n')}\n`
+  }
+
+  // The reviewer's probes (each reaches its own task object and sets `fails`), one per it().
+  const probeSource = readFileSync(
+    new URL('./fixtures/probes/reflection-exploits.ts.txt', import.meta.url),
+    'utf8',
+  ).trimEnd()
+  const head = probeSource.slice(0, probeSource.indexOf("describe('exploits'"))
+  const probes = probeSource
+    .split(/\n(?=  it\()/)
+    .slice(1)
+    .map((b) => b.replace(/\n\}\)$/, ''))
+
+  it('has the five reviewer probes', () => {
+    expect(probes).toHaveLength(5)
+  })
+
+  it.each(probes.map((b) => [b.split('\n')[0]!.trim(), b]))(
+    'rejects probe %s (new and evidence files)',
+    (_, block) => {
+      // Without the vitest/suite import, so each probe is judged on its own body.
+      const body = `import { describe, expect, it } from 'vitest'\n\ndescribe('exploits', () => {\n${block}\n})`
+      for (const path of [
+        'backend/tests/a.test.ts',
+        'backend/tests/__evidence__/a.test.ts',
+      ])
+        expect(weakening(whole(body, path))).not.toEqual([])
+    },
+  )
+
+  it('rejects the probe file as a whole', () => {
+    expect(weakening(whole(head + probes.join('\n') + '\n})'))).not.toEqual([])
+  })
+
+  const reflection = [
+    // 1. context discovery by value
+    "it('x', (c) => { const v = Object.values(c); expect(v).toBeTruthy() })",
+    "it('x', (c) => { expect(Object.keys(c)).toEqual([]) })",
+    'beforeEach((ctx) => { Object.entries(ctx as never) })',
+    "test('x', (c) => { expect(Object.getOwnPropertyNames(c!)).toBeTruthy() })",
+    "it.each([1])('x %i', (n, c) => { expect(Object.getOwnPropertyDescriptors((c))).toBeTruthy() })",
+    // 2. arguments
+    "it('x', function () { expect(arguments.length).toBe(1) })",
+    // 3. runner internals and module loading
+    "import { getCurrentTest } from 'vitest/suite'",
+    "import { createTaskCollector } from '@vitest/runner'",
+    "import 'vitest/node'",
+    "export { x } from 'vitest/runners'",
+    'const m = await import(name)',
+    "const m = await import('vitest/suite')",
+    "const fs = require('node:fs')",
+    "const m = await vi.importActual('vitest/suite')",
+    'const m = await vi.importActual(name)',
+    // 4. worker globals
+    'const w = (globalThis as any).__vitest_worker__',
+    'const w = (window as any).__state',
+    'const w = self.__x',
+    "const w = global['__vitest_worker__']",
+    "const s = '__vitest_worker__'",
+    // 5. computed keys in binding patterns
+    'const { [key]: t } = ctx',
+    // 6. writes through a variable key
+    't[k] = true',
+    't[k] ??= true',
+    't[k]++',
+    't[a.b] = 1',
+    't[`x${y}`] = 1',
+  ]
+
+  it.each(reflection)('new test files reject %j', (text) => {
+    expect(weakening(added(text))).not.toEqual([])
+  })
+
+  it.each(reflection)('evidence files reject %j', (text) => {
+    expect(
+      weakening(added(text, 'backend/tests/__evidence__/a.test.ts')),
+    ).not.toEqual([])
+  })
+
+  it.each(reflection)('modified test files reject %j', (text) => {
+    expect(weakening(mod(text))).not.toEqual([])
+  })
+
+  it.each([
+    "expect(Object.keys(todo)).toEqual(['id'])",
+    "it('x', (c) => { expect(Object.keys(other)).toEqual([]) })",
+    "const m = await import('../src/a')",
+    "vi.mock('../x', () => import('../x/mocks'))",
+    "const v = await vi.importActual('../src/a')",
+    "import '@testing-library/jest-dom/vitest'",
+    'const arr = [0]\narr[0] = 1',
+    "const obj: Record<string, number> = {}\nobj['a'] = 1",
+    'const { a: b } = o',
+    "window.localStorage.setItem('a', 'b')",
+    'const x = values[i]',
+  ])('new test files still allow %j', (text) => {
+    expect(check(added(text)).violations).toEqual([])
+  })
+})
+
 describe('checkApplied (R12: post-apply full-file context)', () => {
   const existing = [
     "import { expect, it } from 'vitest'",

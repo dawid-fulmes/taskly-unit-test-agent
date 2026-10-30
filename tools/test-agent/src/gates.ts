@@ -65,6 +65,162 @@ interface Lexed {
   tamper: { offset: number; why: string }[]
 }
 
+const TEST_FNS = new Set([
+  'it',
+  'test',
+  'describe',
+  'suite',
+  'beforeEach',
+  'afterEach',
+  'beforeAll',
+  'afterAll',
+])
+const REFLECT_OBJECT = new Set([
+  'values',
+  'entries',
+  'keys',
+  'getOwnPropertyNames',
+  'getOwnPropertyDescriptors',
+])
+const GLOBAL_OBJECTS = new Set(['globalThis', 'global', 'self', 'window'])
+// Runner internals: any vitest subpath (vitest/suite, vitest/node, ...) and any @vitest/* package.
+const INTERNAL_MODULE = /^(?:vitest\/|@vitest\/)/
+const VI_LOADERS = new Set(['importActual', 'importMock', 'mock', 'doMock'])
+
+/** `(x as T)`, `x!`, `(x)`, `<T>x`, `x satisfies T` -> `x`. */
+function unwrap(node: ts.Expression): ts.Expression {
+  let n = node
+  while (
+    ts.isParenthesizedExpression(n) ||
+    ts.isAsExpression(n) ||
+    ts.isNonNullExpression(n) ||
+    ts.isTypeAssertionExpression(n) ||
+    ts.isSatisfiesExpression(n)
+  )
+    n = n.expression
+  return n
+}
+
+/** Base identifier of `it.each([...])`, `test.concurrent`, `describe`. */
+function calleeRoot(node: ts.Expression): string | null {
+  let n = unwrap(node)
+  while (
+    ts.isPropertyAccessExpression(n) ||
+    ts.isElementAccessExpression(n) ||
+    ts.isCallExpression(n)
+  )
+    n = unwrap(n.expression)
+  return ts.isIdentifier(n) ? n.text : null
+}
+
+/** Names of parameters of functions passed directly to it/test/describe/hooks (the test context). */
+function testCallbackParams(sf: ts.SourceFile): Set<string> {
+  const names = new Set<string>()
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      TEST_FNS.has(calleeRoot(node.expression) ?? '')
+    )
+      for (const arg of node.arguments) {
+        const fn = unwrap(arg)
+        if (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))
+          for (const p of fn.parameters)
+            if (ts.isIdentifier(p.name)) names.add(p.name.text)
+      }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  return names
+}
+
+const isStringLike = (n: ts.Node) =>
+  ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)
+
+/** Module specifier check for static and dynamic loads. */
+function badSpecifier(
+  arg: ts.Node | undefined,
+  mustBeLiteral: boolean,
+): boolean {
+  if (arg === undefined) return mustBeLiteral
+  if (!isStringLike(arg)) return mustBeLiteral
+  return INTERNAL_MODULE.test((arg as ts.StringLiteral).text)
+}
+
+/** Fix round 2: ways a test reaches its own task object or the runner by reflection. */
+function reflectionPaths(
+  node: ts.Node,
+  contextParams: Set<string>,
+  flag: (node: ts.Node, why: string) => void,
+): void {
+  if (
+    (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+    node.moduleSpecifier &&
+    badSpecifier(node.moduleSpecifier, true)
+  )
+    flag(node, 'imports vitest runner internals')
+  if (ts.isImportEqualsDeclaration(node))
+    flag(node, 'import = require is not allowed')
+  if (ts.isCallExpression(node)) {
+    const callee = unwrap(node.expression)
+    const [first] = node.arguments
+    if (node.expression.kind === K.ImportKeyword) {
+      if (badSpecifier(first, true))
+        flag(node, 'dynamic import of a computed or internal module')
+    } else if (
+      ts.isPropertyAccessExpression(callee) &&
+      ts.isIdentifier(callee.expression)
+    ) {
+      const obj = callee.expression.text
+      const name = callee.name.text
+      if (obj === 'vi' && VI_LOADERS.has(name)) {
+        const literalOnly = name === 'importActual' || name === 'importMock'
+        if (badSpecifier(first, literalOnly))
+          flag(node, `vi.${name} of a computed or internal module`)
+      }
+      if (obj === 'Object' && REFLECT_OBJECT.has(name) && first) {
+        const arg = unwrap(first)
+        if (
+          ts.isIdentifier(arg) &&
+          (arg.text === 'arguments' || contextParams.has(arg.text))
+        )
+          flag(node, `Object.${name} on the test context`)
+      }
+    }
+  }
+  if (
+    (ts.isPropertyAccessExpression(node) && node.name.text.startsWith('__')) ||
+    (ts.isElementAccessExpression(node) &&
+      isStringLike(node.argumentExpression) &&
+      (node.argumentExpression as ts.StringLiteral).text.startsWith('__'))
+  ) {
+    const base = unwrap(node.expression)
+    if (ts.isIdentifier(base) && GLOBAL_OBJECTS.has(base.text))
+      flag(node, 'internal global (__*) access')
+  }
+  const variableKeyTarget = (target: ts.Expression) => {
+    const t = unwrap(target)
+    return (
+      ts.isElementAccessExpression(t) &&
+      !ts.isNumericLiteral(t.argumentExpression) &&
+      !isStringLike(t.argumentExpression)
+    )
+  }
+  if (
+    ts.isBinaryExpression(node) &&
+    node.operatorToken.kind >= K.FirstAssignment &&
+    node.operatorToken.kind <= K.LastAssignment &&
+    variableKeyTarget(node.left)
+  )
+    flag(node, 'write through a variable key')
+  if (
+    (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+    (node.operator === K.PlusPlusToken ||
+      node.operator === K.MinusMinusToken) &&
+    variableKeyTarget(node.operand)
+  )
+    flag(node, 'write through a variable key')
+}
+
 const hasMemberTarget = (node: ts.Node): boolean =>
   ts.isPropertyAccessExpression(node) ||
   ts.isElementAccessExpression(node) ||
@@ -77,10 +233,16 @@ const hasMemberTarget = (node: ts.Node): boolean =>
  */
 function taskTampering(sf: ts.SourceFile): Lexed['tamper'] {
   const out: Lexed['tamper'] = []
+  const contextParams = testCallbackParams(sf)
+  const flag = (node: ts.Node, why: string) =>
+    out.push({ offset: node.getStart(sf), why })
   const visit = (node: ts.Node): void => {
+    reflectionPaths(node, contextParams, flag)
     // The parser runs without parent pointers: inspect patterns from the pattern node.
     if (ts.isObjectBindingPattern(node))
       for (const el of node.elements) {
+        if (el.propertyName && ts.isComputedPropertyName(el.propertyName))
+          flag(el, 'computed key in a destructuring pattern')
         const key = el.propertyName ?? el.name
         if (
           (ts.isIdentifier(key) || ts.isStringLiteral(key)) &&
@@ -456,6 +618,8 @@ const TASK_MEMBER = /\.task(?![\w$])/
 const TASK_OBJECT = /(?<![\w$.])task\s*(?:!\s*)?(?:\?\.|\.|\[)/
 const OBJECT_MUTATION =
   /(?<![\w$.])Object\.(?:assign|defineProperty|defineProperties|setPrototypeOf)(?![\w$])/
+const ARGUMENTS = /(?<![\w$.])arguments(?![\w$])/
+const REQUIRE = /(?<![\w$.])require(?![\w$])/
 // The operator, not `.delete(` calls or a `delete:` object key.
 const DELETE_OPERATOR = /(?<![\w$.])delete(?![\w$])(?!\s*:)/
 const IMPORT_AS = /\bimport\s*(?:type\s*)?(?:\{[^}]*\bas\s+|\*\s*as\s+)/
@@ -526,6 +690,10 @@ function weakeningReasons(
   if (OBJECT_MUTATION.test(n))
     out.push('Object.assign/defineProperty/setPrototypeOf not allowed')
   if (DELETE_OPERATOR.test(n)) out.push('delete operator not allowed')
+  if (ARGUMENTS.test(n)) out.push('arguments object not allowed')
+  if (REQUIRE.test(n)) out.push('require not allowed')
+  // Raw text: also inside strings (`g['__vitest_worker__']`).
+  if (/__vitest_/.test(raw)) out.push('vitest internal (__vitest_*) reference')
   if (modified) {
     for (const [re, why] of MODIFIED_ONLY) if (re.test(b)) out.push(why)
     const r = normalise(raw)
