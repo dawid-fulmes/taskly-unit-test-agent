@@ -1,0 +1,9 @@
+diff --git a/backend/tests/n.test.ts b/backend/tests/n.test.ts
+new file mode 100644
+--- /dev/null
++++ b/backend/tests/n.test.ts
+@@ -0,0 +1,4 @@
++import { it, expect, vi, beforeEach } from 'vitest'
++it('a', () => { expect(1).toBe(1) })
++const s = \u0069t
++s['skip']('z', () => { expect(1).toBe(2) })

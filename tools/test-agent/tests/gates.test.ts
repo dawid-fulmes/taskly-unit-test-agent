@@ -233,7 +233,6 @@ describe('checkPatch hostile parser shapes', () => {
 
   it('does not flag comparisons or arrow params', () => {
     expect(rules(added('if (a === b) {}'))).toEqual([])
-    expect(rules(added('const f = (it) => it'))).toEqual([])
     expect(rules(added('xs.map(test => test)'))).toEqual([])
   })
 
@@ -313,6 +312,84 @@ describe('checkPatch round 2 bypasses', () => {
     expect(rules(mod('const m = expect.objectContaining({ a: 1 })'))).toEqual(
       [],
     )
+  })
+})
+
+describe('checkPatch round 3 bypasses', () => {
+  it.each([
+    'n01_uesc_skip',
+    'n02_uesc_only',
+    'n03_uesc_shadow',
+    'n04_uesc_alias',
+    'n05_paren_alias',
+    'n06_vifn_and_alias',
+    'n07_import_as',
+    'n08_reflect',
+    'n09_arrow_arg',
+    'm01_uesc_vimock',
+    'm02_uesc_hook',
+    'm03_optchain_hook',
+    'm04_paren_hook',
+    'm05_optchain_vimock',
+    'm06_optbracket_vi',
+  ])('%s is rejected', (name) => {
+    const r = check(fixture(name))
+    expect(r.ok).toBe(false)
+    expect(r.violations.length).toBeGreaterThan(0)
+  })
+
+  it('unicode escapes are reported as forbidden-call', () => {
+    const v = check(fixture('n01_uesc_skip')).violations
+    expect(
+      v.some(
+        (x) =>
+          x.rule === 'forbidden-call' && x.detail.includes('unicode escape'),
+      ),
+    ).toBe(true)
+  })
+
+  const added = (line: string) =>
+    `diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts\nnew file mode 100644\n--- /dev/null\n+++ b/backend/tests/a.test.ts\n@@ -0,0 +1,2 @@\n+expect(1)\n+${line}\n`
+  const mod = (line: string) =>
+    `diff --git a/backend/tests/a.test.ts b/backend/tests/a.test.ts\n--- a/backend/tests/a.test.ts\n+++ b/backend/tests/a.test.ts\n@@ -3,0 +4 @@\n+${line}\n`
+
+  it.each([
+    'const s = (it)',
+    'const s = 0 || it',
+    'const s = vi.fn() && it',
+    "import { it as t } from 'vitest'",
+    "import * as v from 'vitest'",
+    "Reflect.get(it, 'skip')",
+    "const k = 'skip'",
+    'const k = `only`',
+    'const k = "skipIf"',
+  ])('new files reject %j', (line) => {
+    expect(rules(added(line)).length).toBeGreaterThan(0)
+  })
+
+  it.each([
+    'beforeEach?.(() => {})',
+    '(beforeEach)(() => {})',
+    'vi?.mock("x")',
+    "vi?.['mock']('x')",
+    'const h = afterAll',
+    'const m = vi',
+  ])('modified files reject %j', (line) => {
+    expect(rules(mod(line))).toEqual(['weakening'])
+  })
+
+  it('does not flag comparisons, object keys, plain imports or call exemptions', () => {
+    for (const l of [
+      'if (a === it) {}',
+      'if (a !== test) {}',
+      'if (a <= b || a >= c) {}',
+      'const cases = [{ test: 1, it: 2 }]',
+      'const f = vi.fn()',
+      "const k = 'skipper'",
+    ])
+      expect(rules(added(l))).toEqual([])
+    expect(rules(mod("import { vi } from 'vitest'"))).toEqual([])
+    expect(rules(mod('const x = vi.fn()'))).toEqual([])
   })
 })
 

@@ -42,6 +42,10 @@ const BRACKET_ACCESS = new RegExp(`\\b${RUNNERS}\\s*\\[`)
 const SKIP_ALIAS =
   /\b(?:it|test|describe|suite)(?:\.\w+)*\.(?:skip|only|todo|fails|skipIf|runIf)\b/
 
+const MODIFIER_STRING =
+  /(['"`])(?:skip|only|todo|fails|skipIf|runIf|concurrent|sequential)\1/
+const UNICODE_ESCAPE = /\\u[0-9a-fA-F]{4}|\\u\{/
+
 /** Reasons a chunk of added text declares skipped/focused tests (may span lines). */
 function forbiddenCallReasons(text: string, calls: string[]): string[] {
   const n = normalise(text)
@@ -50,6 +54,8 @@ function forbiddenCallReasons(text: string, calls: string[]): string[] {
   if (call) out.push(call)
   if (BRACKET_ACCESS.test(n)) out.push('bracket access on test function')
   if (SKIP_ALIAS.test(n)) out.push('skip/only/todo/fails modifier')
+  if (MODIFIER_STRING.test(text)) out.push('modifier name used as a string')
+  if (UNICODE_ESCAPE.test(text)) out.push('unicode escape not allowed')
   return out
 }
 
@@ -70,9 +76,25 @@ const MODIFIED_ONLY: [RegExp, string][] = [
   [/\bvi\s*\[/, 'bracket access on vi'],
 ]
 
-const ALIAS_RHS = new RegExp(
-  `=\\s*(?:it|test|describe|suite|bench|vi|expect)\\b(?!\\s*\\()(?!\\.(?:fn|spyOn)\\()(?!\\.(?:any|anything|objectContaining|arrayContaining|stringContaining|stringMatching)\\()`,
+const NAMES = 'it|test|describe|suite|bench|vi|expect'
+// Assignment `=` that is not part of ==, ===, !=, !==, <=, >=, =>.
+const ASSIGN_RHS = /(?<![=!<>])=(?![=>])([^;\n]*)/g
+// Bare reference to a test global: not a property (`.it`), not a call/member, not an object key.
+const BARE_GLOBAL = new RegExp(`(?<![.\\w$])(?:${NAMES})\\b(?!\\s*[.(:])`)
+const CALL_ALIAS = new RegExp(
+  `(?<![=!<>])=(?![=>])\\s*(?:${NAMES})\\b(?!\\s*\\()(?!\\.(?:fn|spyOn)\\()(?!\\.(?:any|anything|objectContaining|arrayContaining|stringContaining|stringMatching)\\()`,
 )
+const IMPORT_AS = /\bimport\s*(?:type\s*)?(?:\{[^}]*\bas\s+|\*\s*as\s+)/
+const HOOK_TOKENS = 'beforeEach|beforeAll|afterEach|afterAll|vi'
+const HOOK_OPTIONAL = new RegExp(`\\b(?:${HOOK_TOKENS})\\s*\\?\\.`)
+const HOOK_BARE = new RegExp(`(?<![.\\w$])(?:${HOOK_TOKENS})\\b(?!\\s*[.(])`)
+
+function aliasesGlobal(n: string): boolean {
+  if (CALL_ALIAS.test(n)) return true
+  for (const m of n.matchAll(ASSIGN_RHS))
+    if (BARE_GLOBAL.test(m[1]!)) return true
+  return false
+}
 
 /** Reasons a chunk of added text weakens tests (may span lines). */
 function weakeningReasons(text: string, modified: boolean): string[] {
@@ -82,9 +104,18 @@ function weakeningReasons(text: string, modified: boolean): string[] {
     out.push('declares or reassigns a test global')
   if (/\bexpect\.assertions\(\s*0\s*\)/.test(n))
     out.push('expect.assertions(0)')
-  if (ALIAS_RHS.test(n)) out.push('aliases or destructures a test global')
-  if (modified)
+  if (aliasesGlobal(n)) out.push('aliases or destructures a test global')
+  if (IMPORT_AS.test(n)) out.push('renaming import')
+  if (/\bReflect\s*\./.test(n)) out.push('Reflect usage')
+  if (modified) {
     for (const [re, why] of MODIFIED_ONLY) if (re.test(n)) out.push(why)
+    const body = n
+      .split('\n')
+      .filter((l) => !/^\s*import\b/.test(l))
+      .join('\n')
+    if (HOOK_OPTIONAL.test(n) || HOOK_BARE.test(body))
+      out.push('indirect hook/vi reference in existing test file')
+  }
   return out
 }
 
