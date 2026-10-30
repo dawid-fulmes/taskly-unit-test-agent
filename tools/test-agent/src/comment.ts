@@ -452,3 +452,61 @@ export function renderComment(
 export function renderDismissNote(text: string): string {
   return `> **Dismissed:** ${escapeModelText(text)}\n`
 }
+
+/** The verdict line for an outcome (comment heading and check run title). */
+export function verdictLine(outcome: Outcome): string {
+  return VERDICT_LINES[outcome]
+}
+
+// Model text can never produce this line: `<` is HTML-escaped in prose and `<!--` is broken in fences.
+const OUTCOME_MARKER = /\n?<!-- test-agent:outcome ([a-z-]+) -->\n?$/
+
+/** Appends (or replaces) the machine-readable outcome line that the dismiss path reads back. */
+export function withOutcomeMarker(body: string, outcome: Outcome): string {
+  const rest = body.replace(OUTCOME_MARKER, '')
+  return `${rest.endsWith('\n') ? rest : `${rest}\n`}<!-- test-agent:outcome ${outcome} -->\n`
+}
+
+export function outcomeFromComment(body: string): Outcome | null {
+  const m = OUTCOME_MARKER.exec(body.replace(/\r\n/g, '\n'))
+  const o = m?.[1]
+  return o !== undefined && Object.hasOwn(VERDICT_LINES, o)
+    ? (o as Outcome)
+    : null
+}
+
+const NOTE_PREFIX = '> **Dismissed:** '
+
+/**
+ * The sticky comment after a dismiss label: the note replaces any earlier note under the
+ * heading; when `dismissed`, the heading and outcome line become `defect-dismissed`.
+ */
+export function dismissComment(
+  body: string | null,
+  note: string,
+  dismissed: boolean,
+): string {
+  const noteLine = renderDismissNote(note).trimEnd()
+  if (body === null) return `${COMMENT_MARKER}\n\n${noteLine}\n`
+  const text = body.replace(/\r\n/g, '\n')
+  let outcome = outcomeFromComment(text)
+  const lines = text.replace(OUTCOME_MARKER, '').split('\n')
+  const kept: string[] = []
+  for (const line of lines) {
+    if (line.startsWith(NOTE_PREFIX)) {
+      if (kept.at(-1) === '') kept.pop()
+      continue
+    }
+    kept.push(line)
+  }
+  let heading = kept.findIndex((l) => l.startsWith('## '))
+  if (dismissed) {
+    outcome = 'defect-dismissed'
+    if (heading >= 0) kept[heading] = `## ${verdictLine(outcome)}`
+  }
+  // No heading (a note-only comment): the note goes right below the marker.
+  if (heading < 0) heading = 0
+  kept.splice(heading + 1, 0, '', noteLine)
+  const out = kept.join('\n')
+  return outcome === null ? out : withOutcomeMarker(out, outcome)
+}

@@ -106,7 +106,7 @@ function unguardedToolUses(
   return out
 }
 
-function readExpectedSha(text: string | null): string | null {
+export function readExpectedSha(text: string | null): string | null {
   const token = text?.trim().split(/\s+/)[0] ?? ''
   return /^[0-9a-f]{64}$/.test(token) ? token : null
 }
@@ -123,7 +123,7 @@ function containerUser(override: string | undefined): string {
 }
 
 /** Spec §7.1 integrity and gates; violations empty means the patch may be applied. */
-function patchViolations(
+export function patchViolations(
   patchBuf: Buffer,
   patchText: string,
   actualSha: string,
@@ -146,7 +146,7 @@ function patchViolations(
 }
 
 /** R12 on the work tree: every patched test file as `git apply` wrote it. */
-async function gateApplied(
+export async function gateApplied(
   fs: VerifyDeps['fs'],
   workDir: string,
   testDiffs: FileDiff[],

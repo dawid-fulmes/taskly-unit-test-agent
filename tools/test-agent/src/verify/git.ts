@@ -19,17 +19,27 @@ const GIT_ENV = (): Record<string, string> => ({
   GIT_TERMINAL_PROMPT: '0',
 })
 
+/** Runs git with the hardened env and returns the raw result (never throws on a git failure). */
+export function gitResult(
+  exec: Exec,
+  cwd: string,
+  args: string[],
+  extraEnv: Record<string, string> = {},
+): ReturnType<Exec> {
+  return exec('git', args, {
+    cwd,
+    env: { ...GIT_ENV(), ...extraEnv },
+    timeoutMs: 120_000,
+  })
+}
+
 export async function git(
   exec: Exec,
   cwd: string,
   args: string[],
   extraEnv: Record<string, string> = {},
 ): Promise<string> {
-  const r = await exec('git', args, {
-    cwd,
-    env: { ...GIT_ENV(), ...extraEnv },
-    timeoutMs: 120_000,
-  })
+  const r = await gitResult(exec, cwd, args, extraEnv)
   if (r.code !== 0 || r.timedOut)
     throw new Error(
       `git ${args[0]} failed (code ${r.code}): ${r.stderr.trim().slice(0, 300)}`,
